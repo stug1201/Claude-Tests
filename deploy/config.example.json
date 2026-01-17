@@ -1,0 +1,16 @@
+{
+  "telegram_bot_token": "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz",
+  "telegram_channel_id": "-1001234567890",
+  "telegram_admin_id": 123456789,
+  "tickers": [
+    {"symbol": "BTCUSDT", "exchange": "binance", "market_type": "perpetual", "enabled": true},
+    {"symbol": "ETHUSDT", "exchange": "binance", "market_type": "perpetual", "enabled": true},
+    {"symbol": "SOLUSDT", "exchange": "binance", "market_type": "perpetual", "enabled": true},
+    {"symbol": "BTC-USD", "exchange": "coinbase", "market_type": "spot", "enabled": false}
+  ],
+  "analysis_interval_sec": 30,
+  "min_buffer_sec": 120,
+  "buffer_minutes": 30,
+  "min_confidence": "LOW",
+  "alert_on_updates": false
+}
