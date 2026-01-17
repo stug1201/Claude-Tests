@@ -193,8 +193,10 @@ class TWAPClassifier:
         detection: TWAPDetection,
         size_cat: SizeCategory,
         urgency_cat: UrgencyCategory,
+        confidence: ConfidenceLevel,
+        risk_score: float,
     ) -> str:
-        """Generate human-readable description of the TWAP."""
+        """Generate human-readable description of the TWAP with full context."""
         side_verb = "buying" if detection.side == "buy" else "selling"
         side_noun = "accumulation" if detection.side == "buy" else "distribution"
 
@@ -211,12 +213,26 @@ class TWAPClassifier:
             SizeCategory.WHALE: "A whale",
         }
 
+        # Confidence context
+        confidence_context = {
+            ConfidenceLevel.HIGH: f"Signal strength is strong (SNR: {detection.snr:.1f}), making this a reliable detection.",
+            ConfidenceLevel.MEDIUM: f"Signal is moderate (SNR: {detection.snr:.1f}); pattern is likely real but monitor for confirmation.",
+            ConfidenceLevel.LOW: f"Signal is weak (SNR: {detection.snr:.1f}); treat as tentative - could be noise or early-stage TWAP.",
+        }
+
+        # Risk context
+        if risk_score >= 60:
+            risk_context = f"Risk score {risk_score:.0f}/100 suggests significant potential market impact."
+        elif risk_score >= 30:
+            risk_context = f"Risk score {risk_score:.0f}/100 indicates moderate market influence."
+        else:
+            risk_context = f"Risk score {risk_score:.0f}/100 implies limited market impact."
+
         return (
             f"{size_desc[size_cat]} is {urgency_desc[urgency_cat]} {side_verb}, "
             f"executing ~${detection.estimated_per_execution_value:,.0f} every "
             f"{detection.interval_seconds:.0f} seconds. "
-            f"This {side_noun} pattern suggests "
-            f"{'strong conviction' if urgency_cat == UrgencyCategory.AGGRESSIVE else 'patient positioning'}."
+            f"{confidence_context[confidence]} {risk_context}"
         )
 
     def classify(self, detection: TWAPDetection) -> ClassifiedTWAP:
@@ -233,7 +249,9 @@ class TWAPClassifier:
         urgency_cat = self._classify_urgency(detection.interval_seconds)
         confidence = self._classify_confidence(detection)
         risk_score = self._calculate_risk_score(detection, size_cat, urgency_cat)
-        description = self._generate_description(detection, size_cat, urgency_cat)
+        description = self._generate_description(
+            detection, size_cat, urgency_cat, confidence, risk_score
+        )
 
         return ClassifiedTWAP(
             detection=detection,

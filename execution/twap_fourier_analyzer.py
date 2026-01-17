@@ -248,10 +248,17 @@ class TWAPAnalyzer:
         return amplitude
 
     def _calculate_confidence(self, snr: float, cycles: float) -> str:
-        """Determine confidence level based on SNR and number of cycles."""
-        if snr >= 8 and cycles >= 20:
+        """Determine confidence level based on SNR and number of cycles.
+
+        Tuned for real-world market data which is inherently noisy.
+        Lower thresholds than theoretical because:
+        - Real TWAPs have execution jitter
+        - Market noise is correlated, not random
+        - Multiple overlapping TWAPs create interference
+        """
+        if snr >= 4.5 and cycles >= 10:
             return "HIGH"
-        elif snr >= 5 and cycles >= 10:
+        elif snr >= 3.5 and cycles >= 6:
             return "MEDIUM"
         else:
             return "LOW"

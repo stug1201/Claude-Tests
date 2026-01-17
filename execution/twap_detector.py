@@ -17,7 +17,7 @@ import asyncio
 import os
 import sys
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 # Add execution directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,10 +33,46 @@ from twap_fourier_analyzer import TWAPAnalyzer
 from twap_classifier import TWAPClassifier, generate_summary_report
 
 
+class TrackedTWAP:
+    """Represents a tracked TWAP with a persistent name."""
+
+    def __init__(self, name: str, side: str, frequency_hz: float, first_seen: datetime):
+        self.name = name
+        self.side = side
+        self.frequency_hz = frequency_hz
+        self.first_seen = first_seen
+        self.last_seen = first_seen
+        self.detection_count = 1
+
+    @property
+    def interval_seconds(self) -> float:
+        return 1.0 / self.frequency_hz if self.frequency_hz > 0 else 0
+
+    def matches(self, side: str, frequency_hz: float, tolerance: float = 0.15) -> bool:
+        """Check if a detection matches this tracked TWAP."""
+        if side != self.side:
+            return False
+        # Allow 15% frequency tolerance for matching
+        freq_diff = abs(frequency_hz - self.frequency_hz) / self.frequency_hz
+        return freq_diff <= tolerance
+
+    def update(self, detection_time: datetime) -> None:
+        """Update tracking when TWAP is re-detected."""
+        self.last_seen = detection_time
+        self.detection_count += 1
+
+
 class TWAPDetectorCLI:
     """
     Interactive CLI for TWAP detection.
     """
+
+    # Greek letters for naming TWAPs
+    TWAP_NAMES = [
+        "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta",
+        "Iota", "Kappa", "Lambda", "Mu", "Nu", "Xi", "Omicron", "Pi",
+        "Rho", "Sigma", "Tau", "Upsilon", "Phi", "Chi", "Psi", "Omega"
+    ]
 
     def __init__(self):
         self.collector: Optional[TradeCollector] = None
@@ -48,6 +84,10 @@ class TWAPDetectorCLI:
         # Detection state
         self.all_detections = []
         self.running = False
+
+        # TWAP tracking
+        self.tracked_twaps: List[TrackedTWAP] = []
+        self.next_name_index = 0
 
     def clear_screen(self) -> None:
         """Clear terminal screen."""
@@ -103,6 +143,35 @@ class TWAPDetectorCLI:
         idx = self.print_menu("SELECT MARKET TYPE", options)
         return MarketType.SPOT if idx == 0 else MarketType.PERPETUAL
 
+    def get_or_create_tracked_twap(
+        self, side: str, frequency_hz: float
+    ) -> Tuple[TrackedTWAP, bool]:
+        """
+        Find existing tracked TWAP or create a new one.
+
+        Returns:
+            Tuple of (TrackedTWAP, is_new: bool)
+        """
+        now = datetime.now()
+
+        # Check for matching existing TWAP
+        for tracked in self.tracked_twaps:
+            if tracked.matches(side, frequency_hz):
+                tracked.update(now)
+                return tracked, False
+
+        # Create new tracked TWAP
+        if self.next_name_index < len(self.TWAP_NAMES):
+            name = self.TWAP_NAMES[self.next_name_index]
+        else:
+            # Fallback if we run out of Greek letters
+            name = f"TWAP-{self.next_name_index + 1}"
+
+        self.next_name_index += 1
+        new_twap = TrackedTWAP(name, side, frequency_hz, now)
+        self.tracked_twaps.append(new_twap)
+        return new_twap, True
+
     def select_symbol(self, exchange: Exchange, market_type: MarketType) -> str:
         """Menu to select trading pair."""
         pairs = get_available_pairs(exchange, market_type)
@@ -138,15 +207,32 @@ class TWAPDetectorCLI:
                 print("\nExiting...")
                 sys.exit(0)
 
-    def format_detection_alert(self, classified_twap) -> str:
-        """Format a detection for display."""
+    def format_detection_alert(
+        self, classified_twap, tracked: TrackedTWAP, is_new: bool
+    ) -> str:
+        """Format a detection for display with tracking info."""
         d = classified_twap.detection
         c = classified_twap
 
+        # Status line based on whether this is new or continuing
+        if is_new:
+            status_line = f"🎯 NEW TWAP DETECTED: \"{tracked.name}\""
+        else:
+            duration = (tracked.last_seen - tracked.first_seen).total_seconds()
+            if duration < 60:
+                duration_str = f"{duration:.0f}s"
+            else:
+                duration_str = f"{duration/60:.1f}min"
+            status_line = (
+                f"🔄 TWAP UPDATE: \"{tracked.name}\" "
+                f"(seen {tracked.detection_count}x over {duration_str})"
+            )
+
         return (
             f"\n{'='*60}\n"
-            f"🎯 TWAP DETECTED!\n"
+            f"{status_line}\n"
             f"{'='*60}\n"
+            f"  Name:          {tracked.name}\n"
             f"  Side:          {d.side.upper()}\n"
             f"  Category:      {c.size_category.value} ({c.urgency_category.value})\n"
             f"  Interval:      {d.interval_seconds:.1f} seconds\n"
@@ -170,7 +256,6 @@ class TWAPDetectorCLI:
     async def run_analysis_loop(self) -> None:
         """Periodically analyze collected data for TWAPs."""
         last_analysis = datetime.now()
-        detected_frequencies = set()  # Track already-detected patterns
 
         while self.running:
             await asyncio.sleep(5)  # Check every 5 seconds
@@ -178,13 +263,16 @@ class TWAPDetectorCLI:
             stats = self.collector.get_stats()
             buffer_sec = stats.get("buffer_duration_sec", 0)
 
-            # Status update
+            # Status update with active TWAP count
             now = datetime.now().strftime("%H:%M:%S")
+            active_count = len(self.tracked_twaps)
+            active_str = f" | Active TWAPs: {active_count}" if active_count > 0 else ""
             print(
                 f"\r[{now}] Trades: {stats.get('trades_in_buffer', 0):,} | "
                 f"Buffer: {buffer_sec:.0f}s | "
                 f"Vol: {stats.get('total_volume', 0):.4f} "
-                f"(B:{stats.get('buy_volume', 0):.4f} S:{stats.get('sell_volume', 0):.4f})",
+                f"(B:{stats.get('buy_volume', 0):.4f} S:{stats.get('sell_volume', 0):.4f})"
+                f"{active_str}",
                 end="",
                 flush=True,
             )
@@ -209,26 +297,23 @@ class TWAPDetectorCLI:
             analyzer = TWAPAnalyzer(trades, bucket_size_ms=1000)
             detections = analyzer.detect_twaps()
 
-            # Filter new detections (avoid duplicate alerts)
-            new_detections = []
+            # Process detections with tracking
+            alerts_shown = 0
             for det in detections:
-                # Use rounded frequency as signature
-                freq_sig = round(det.frequency_hz, 3)
-                side_sig = det.side
-                key = (side_sig, freq_sig)
+                tracked, is_new = self.get_or_create_tracked_twap(
+                    det.side, det.frequency_hz
+                )
 
-                if key not in detected_frequencies:
-                    detected_frequencies.add(key)
-                    new_detections.append(det)
+                if is_new:
                     self.all_detections.append(det)
 
-            # Display new detections
-            if new_detections:
-                classified = self.classifier.classify_all(new_detections)
-                for c in classified:
-                    print(self.format_detection_alert(c))
-            else:
-                print(f"[{now}] Analysis complete - no new patterns detected")
+                # Classify and display
+                classified = self.classifier.classify(det)
+                print(self.format_detection_alert(classified, tracked, is_new))
+                alerts_shown += 1
+
+            if alerts_shown == 0:
+                print(f"[{now}] Analysis complete - no patterns detected")
 
     async def monitor(
         self,
@@ -268,6 +353,8 @@ class TWAPDetectorCLI:
 
         self.running = True
         self.all_detections = []
+        self.tracked_twaps = []
+        self.next_name_index = 0
 
         # Run collector and analysis loop concurrently
         try:
@@ -283,10 +370,29 @@ class TWAPDetectorCLI:
 
             # Print final summary
             print("\n\n")
-            if self.all_detections:
-                classified = self.classifier.classify_all(self.all_detections)
-                report = generate_summary_report(classified)
-                print(report)
+            if self.tracked_twaps:
+                print("=" * 60)
+                print("SESSION SUMMARY")
+                print("=" * 60)
+                print(f"\nTotal unique TWAPs detected: {len(self.tracked_twaps)}\n")
+
+                for tracked in self.tracked_twaps:
+                    duration = (tracked.last_seen - tracked.first_seen).total_seconds()
+                    if duration < 60:
+                        duration_str = f"{duration:.0f} seconds"
+                    else:
+                        duration_str = f"{duration/60:.1f} minutes"
+
+                    print(f"  [{tracked.name}] {tracked.side.upper()} TWAP")
+                    print(f"      Interval: {tracked.interval_seconds:.1f}s")
+                    print(f"      Detected: {tracked.detection_count} times over {duration_str}")
+                    print()
+
+                # Also show the detailed report
+                if self.all_detections:
+                    classified = self.classifier.classify_all(self.all_detections)
+                    report = generate_summary_report(classified)
+                    print(report)
             else:
                 print("No TWAP patterns were detected during this session.")
 
