@@ -13,7 +13,7 @@ Usage:
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 from twap_fourier_analyzer import TWAPDetection
 
@@ -244,7 +244,7 @@ class TWAPClassifier:
             description=description,
         )
 
-    def classify_all(self, detections: list[TWAPDetection]) -> list[ClassifiedTWAP]:
+    def classify_all(self, detections: List[TWAPDetection]) -> List[ClassifiedTWAP]:
         """
         Classify multiple detections.
 
@@ -259,7 +259,7 @@ class TWAPClassifier:
         return classified
 
 
-def classify_detections(detections: list[TWAPDetection]) -> list[ClassifiedTWAP]:
+def classify_detections(detections: List[TWAPDetection]) -> List[ClassifiedTWAP]:
     """
     Convenience function to classify detections.
 
@@ -273,7 +273,7 @@ def classify_detections(detections: list[TWAPDetection]) -> list[ClassifiedTWAP]
     return classifier.classify_all(detections)
 
 
-def generate_summary_report(classified: list[ClassifiedTWAP]) -> str:
+def generate_summary_report(classified: List[ClassifiedTWAP]) -> str:
     """
     Generate a summary report of all classified TWAPs.
 

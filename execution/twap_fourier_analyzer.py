@@ -14,7 +14,7 @@ Usage:
 
 import numpy as np
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional, Tuple
 from enum import Enum
 
 
@@ -94,7 +94,7 @@ class TWAPAnalyzer:
         """
         self.trades = trades
         self.bucket_size_ms = bucket_size_ms
-        self.buckets: list[TimeBucket] = []
+        self.buckets: List[TimeBucket] = []
         self.avg_price = avg_price
 
         if trades:
@@ -182,7 +182,7 @@ class TWAPAnalyzer:
         frequencies: np.ndarray,
         power: np.ndarray,
         min_snr: float = MIN_SNR,
-    ) -> list[tuple[float, float, float]]:
+    ) -> List[tuple[float, float, float]]:
         """
         Find significant peaks in power spectrum.
 
@@ -259,8 +259,8 @@ class TWAPAnalyzer:
     def detect_twaps(
         self,
         min_snr: float = MIN_SNR,
-        analyze_sides: Optional[list[str]] = None,
-    ) -> list[TWAPDetection]:
+        analyze_sides: Optional[List[str]] = None,
+    ) -> List[TWAPDetection]:
         """
         Detect TWAP patterns in the trade data.
 
@@ -352,7 +352,7 @@ def analyze_trades(
     trades: list,
     bucket_size_ms: int = 1000,
     min_snr: float = 3.0,
-) -> list[TWAPDetection]:
+) -> List[TWAPDetection]:
     """
     Convenience function to analyze trades for TWAP patterns.
 

@@ -17,7 +17,7 @@ import asyncio
 import os
 import sys
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 # Add execution directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -61,7 +61,7 @@ class TWAPDetectorCLI:
         print("=" * 60)
         print()
 
-    def print_menu(self, title: str, options: list[str]) -> int:
+    def print_menu(self, title: str, options: List[str]) -> int:
         """
         Display a numbered menu and get user selection.
 

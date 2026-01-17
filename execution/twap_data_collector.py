@@ -24,7 +24,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Union
 
 import websockets
 
@@ -73,12 +73,12 @@ class TradeBuffer:
         while self.trades and self.trades[0].timestamp_ms < cutoff:
             self.trades.popleft()
 
-    def get_trades(self) -> list[Trade]:
+    def get_trades(self) -> List[Trade]:
         """Get all trades in buffer."""
         self._cleanup()
         return list(self.trades)
 
-    def get_trades_since(self, since_ms: int) -> list[Trade]:
+    def get_trades_since(self, since_ms: int) -> List[Trade]:
         """Get trades since a specific timestamp."""
         self._cleanup()
         return [t for t in self.trades if t.timestamp_ms >= since_ms]
@@ -110,8 +110,8 @@ class TradeCollector:
 
     def __init__(
         self,
-        exchange: str | Exchange,
-        market_type: str | MarketType,
+        exchange: Union[str, Exchange],
+        market_type: Union[str, MarketType],
         symbol: str,
         buffer_minutes: int = 30,
         on_trade: Optional[Callable[[Trade], None]] = None,
@@ -279,7 +279,7 @@ class TradeCollector:
         if self._ws:
             await self._ws.close()
 
-    def get_trades(self) -> list[Trade]:
+    def get_trades(self) -> List[Trade]:
         """Get all trades in buffer."""
         return self.buffer.get_trades()
 
@@ -338,7 +338,7 @@ COINBASE_PERP_PAIRS = [
 ]
 
 
-def get_available_pairs(exchange: Exchange, market_type: MarketType) -> list[str]:
+def get_available_pairs(exchange: Exchange, market_type: MarketType) -> List[str]:
     """Get available trading pairs for exchange/market combination."""
     if exchange == Exchange.BINANCE:
         if market_type == MarketType.SPOT:
