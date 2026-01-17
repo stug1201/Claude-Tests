@@ -153,7 +153,7 @@ class TWAPAnalyzer:
         window = np.hanning(len(signal))
         return signal * window
 
-    def _compute_fft(self, signal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _compute_fft(self, signal: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute FFT and return frequencies and power spectrum.
 
@@ -182,7 +182,7 @@ class TWAPAnalyzer:
         frequencies: np.ndarray,
         power: np.ndarray,
         min_snr: float = MIN_SNR,
-    ) -> List[tuple[float, float, float]]:
+    ) -> List[Tuple[float, float, float]]:
         """
         Find significant peaks in power spectrum.
 
