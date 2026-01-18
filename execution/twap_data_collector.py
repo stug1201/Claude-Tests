@@ -2,16 +2,22 @@
 """
 TWAP Data Collector
 
-Collects real-time trade data from Binance Perpetual Futures via WebSocket.
+Collects real-time trade data from Binance Spot and Perpetual Futures via WebSocket.
 Maintains a rolling buffer of trades for FFT analysis.
+
+Symbol convention:
+- BTCUSDT = Perpetual futures
+- BTCUSDT.S = Spot market
 
 Usage:
     from twap_data_collector import TradeCollector
 
-    collector = TradeCollector(
-        symbol="BTCUSDT",
-        buffer_minutes=30
-    )
+    # Perpetual
+    collector = TradeCollector(symbol="BTCUSDT", buffer_minutes=30)
+
+    # Spot
+    collector = TradeCollector(symbol="BTCUSDT.S", buffer_minutes=30)
+
     await collector.start()
 """
 
@@ -21,7 +27,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 import websockets
 
@@ -82,13 +88,41 @@ class TradeBuffer:
         return self.trades[-1].timestamp_ms - self.trades[0].timestamp_ms
 
 
-# Binance Perpetual Futures WebSocket endpoint
+# WebSocket endpoints
 BINANCE_PERP_WS = "wss://fstream.binance.com/ws"
+BINANCE_SPOT_WS = "wss://stream.binance.com:9443/ws"
+
+
+def parse_symbol(symbol: str) -> Tuple[str, bool]:
+    """
+    Parse symbol to extract base symbol and market type.
+
+    Returns:
+        (base_symbol, is_spot)
+
+    Examples:
+        "BTCUSDT" -> ("BTCUSDT", False)  # Perpetual
+        "BTCUSDT.S" -> ("BTCUSDT", True)  # Spot
+    """
+    if symbol.endswith(".S"):
+        return symbol[:-2].upper(), True
+    return symbol.upper(), False
+
+
+def format_symbol(base_symbol: str, is_spot: bool) -> str:
+    """Format symbol with market type suffix."""
+    if is_spot:
+        return f"{base_symbol.upper()}.S"
+    return base_symbol.upper()
 
 
 class TradeCollector:
     """
-    Collects trades from Binance Perpetual Futures WebSocket.
+    Collects trades from Binance WebSocket (Spot or Perpetual).
+
+    Symbol convention:
+    - "BTCUSDT" = Perpetual futures
+    - "BTCUSDT.S" = Spot market
     """
 
     def __init__(
@@ -97,7 +131,9 @@ class TradeCollector:
         buffer_minutes: int = 30,
         on_trade: Optional[Callable[[Trade], None]] = None,
     ):
-        self.symbol = symbol.upper()
+        self.original_symbol = symbol
+        self.base_symbol, self.is_spot = parse_symbol(symbol)
+        self.symbol = format_symbol(self.base_symbol, self.is_spot)
         self.buffer_minutes = buffer_minutes
         self.on_trade = on_trade
 
@@ -114,16 +150,23 @@ class TradeCollector:
         self.start_time: Optional[datetime] = None
 
     @property
+    def market_type(self) -> str:
+        """Get market type string."""
+        return "Spot" if self.is_spot else "Perp"
+
+    @property
     def ws_url(self) -> str:
         """Get WebSocket URL for the symbol."""
-        symbol_lower = self.symbol.lower()
+        symbol_lower = self.base_symbol.lower()
+        if self.is_spot:
+            return f"{BINANCE_SPOT_WS}/{symbol_lower}@trade"
         return f"{BINANCE_PERP_WS}/{symbol_lower}@trade"
 
     def _parse_trade(self, message: str) -> Optional[Trade]:
         """Parse trade from WebSocket message."""
         try:
             data = json.loads(message)
-            # Binance trade format:
+            # Binance trade format (same for spot and perp):
             # {"e":"trade","E":timestamp,"s":"BTCUSDT","t":trade_id,
             #  "p":"price","q":"quantity","b":buyer_order_id,
             #  "a":seller_order_id,"T":trade_time,"m":is_buyer_maker}
@@ -167,7 +210,7 @@ class TradeCollector:
         self._running = True
         self.start_time = datetime.now()
 
-        print(f"Connecting to Binance Perpetual for {self.symbol}...")
+        print(f"Connecting to Binance {self.market_type} for {self.symbol}...")
 
         while self._running:
             try:
@@ -223,18 +266,37 @@ class TradeCollector:
         }
 
 
-# Available Binance Perpetual pairs
-AVAILABLE_PAIRS = [
+# Available trading pairs
+PERPETUAL_PAIRS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
     "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "MATICUSDT",
     "LINKUSDT", "LTCUSDT", "ATOMUSDT", "UNIUSDT", "ARBUSDT",
     "OPUSDT", "APTUSDT", "NEARUSDT", "FTMUSDT", "SANDUSDT",
 ]
 
+SPOT_PAIRS = [
+    "BTCUSDT.S", "ETHUSDT.S", "BNBUSDT.S", "SOLUSDT.S", "XRPUSDT.S",
+    "DOGEUSDT.S", "ADAUSDT.S", "AVAXUSDT.S", "DOTUSDT.S", "MATICUSDT.S",
+    "LINKUSDT.S", "LTCUSDT.S", "ATOMUSDT.S", "UNIUSDT.S", "ARBUSDT.S",
+]
 
-def get_available_pairs() -> List[str]:
-    """Get available Binance Perpetual trading pairs."""
-    return AVAILABLE_PAIRS
+
+def get_available_pairs(include_spot: bool = True) -> List[str]:
+    """Get available trading pairs."""
+    pairs = list(PERPETUAL_PAIRS)
+    if include_spot:
+        pairs.extend(SPOT_PAIRS)
+    return pairs
+
+
+def get_perpetual_pairs() -> List[str]:
+    """Get available perpetual pairs only."""
+    return list(PERPETUAL_PAIRS)
+
+
+def get_spot_pairs() -> List[str]:
+    """Get available spot pairs only."""
+    return list(SPOT_PAIRS)
 
 
 async def main():
@@ -242,6 +304,7 @@ async def main():
     def on_trade(trade: Trade):
         print(f"  {trade.side.upper():4} {trade.size:.6f} @ ${trade.price:.2f}")
 
+    # Test perpetual
     collector = TradeCollector(
         symbol="BTCUSDT",
         buffer_minutes=5,

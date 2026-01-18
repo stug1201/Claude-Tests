@@ -1,6 +1,6 @@
 # TWAP Detection System
 
-Real-time detection of Time-Weighted Average Price (TWAP) algorithmic orders on Binance Perpetual Futures using Fourier Transform analysis.
+Real-time detection of Time-Weighted Average Price (TWAP) algorithmic orders on Binance (Perpetual Futures & Spot) using Fourier Transform analysis, with spread anomaly detection.
 
 ## Table of Contents
 
@@ -22,12 +22,14 @@ TWAP (Time-Weighted Average Price) is an algorithmic execution strategy that spl
 
 ### What This System Does
 
-- Connects to Binance Perpetual Futures WebSocket feeds
-- Collects real-time trade data
+- Connects to Binance WebSocket feeds (both Perpetual Futures and Spot markets)
+- Collects real-time trade data and bid/ask spreads
 - Analyzes trade flow using Fast Fourier Transform (FFT)
 - Detects periodic execution patterns indicative of TWAP orders
+- Monitors spread for statistical anomalies (widening/narrowing)
+- Tracks low-confidence TWAPs and confirms through persistence
 - Classifies detections by size, urgency, and confidence
-- Optionally sends alerts to Telegram
+- Sends alerts to Telegram with market type indicators ([SPOT] / [P])
 
 ---
 
@@ -126,53 +128,58 @@ Random market noise is aperiodic and creates a relatively flat power spectrum. T
 │                        TWAP Detection System                        │
 └─────────────────────────────────────────────────────────────────────┘
 
-┌──────────────────────┐     ┌──────────────────────┐
-│  twap_data_collector │     │   Binance WebSocket  │
-│  ──────────────────  │◄────│  (Perpetual Futures) │
-│  - TradeCollector    │     └──────────────────────┘
-│  - TradeBuffer       │
+┌──────────────────────┐     ┌──────────────────────────────────────┐
+│  twap_data_collector │     │        Binance WebSocket             │
+│  ──────────────────  │◄────│  Perp: fstream.binance.com/ws        │
+│  - TradeCollector    │     │  Spot: stream.binance.com:9443/ws    │
+│  - TradeBuffer       │     └──────────────────────────────────────┘
 │  - Trade dataclass   │
-└──────────┬───────────┘
+│  - parse_symbol()    │     Symbol convention:
+│  - format_symbol()   │     - BTCUSDT   = Perpetual Futures
+└──────────┬───────────┘     - BTCUSDT.S = Spot Market
            │ trades[]
            ▼
-┌──────────────────────┐
-│ twap_fourier_analyzer│
-│ ──────────────────── │
-│ - Bucket aggregation │
-│ - Hann windowing     │
-│ - FFT computation    │
-│ - Peak detection     │
-│ - SNR calculation    │
-└──────────┬───────────┘
-           │ TWAPDetection[]
-           ▼
-┌──────────────────────┐
-│   twap_classifier    │
-│   ────────────────   │
-│ - Size categories    │
-│ - Urgency levels     │
-│ - Risk scoring       │
-│ - Description gen    │
-└──────────┬───────────┘
-           │ ClassifiedTWAP[]
-           ▼
+┌──────────────────────┐     ┌──────────────────────┐
+│ twap_fourier_analyzer│     │    spread_monitor    │
+│ ──────────────────── │     │ ────────────────────  │
+│ - Bucket aggregation │     │ - @bookTicker stream │
+│ - Hann windowing     │     │ - ExponentialStats   │
+│ - FFT computation    │     │ - Z-score detection  │
+│ - Peak detection     │     │ - O(1) memory/ticker │
+│ - SNR calculation    │     │ - SpreadAnomaly      │
+└──────────┬───────────┘     └──────────┬───────────┘
+           │ TWAPDetection[]            │ SpreadAnomaly
+           ▼                            │
+┌──────────────────────┐                │
+│   twap_classifier    │                │
+│   ────────────────   │                │
+│ - Size categories    │                │
+│ - Urgency levels     │                │
+│ - Risk scoring       │                │
+│ - Description gen    │                │
+└──────────┬───────────┘                │
+           │ ClassifiedTWAP[]           │
+           ▼                            ▼
 ┌──────────────────────┐     ┌──────────────────────┐
 │   twap_detector.py   │     │ twap_telegram_alerts │
 │   (CLI Interface)    │     │ (Cloud Service)      │
 │   ────────────────   │     │ ──────────────────── │
 │ - Interactive menus  │     │ - Multi-ticker       │
-│ - Single ticker      │     │ - Telegram bot       │
-│ - Local use          │     │ - Admin commands     │
-└──────────────────────┘     └──────────────────────┘
+│ - Single ticker      │     │ - Perp & Spot        │
+│ - Local use          │     │ - Spread alerts      │
+└──────────────────────┘     │ - Low-conf tracking  │
+                             │ - Admin commands     │
+                             └──────────────────────┘
 ```
 
 ### File Descriptions
 
 | File | Purpose |
 |------|---------|
-| `twap_data_collector.py` | WebSocket connection, trade buffering |
+| `twap_data_collector.py` | WebSocket connection, trade buffering, spot/perp support |
 | `twap_fourier_analyzer.py` | FFT analysis, peak detection, TWAP detection logic |
 | `twap_classifier.py` | Classification by size/urgency, risk scoring, descriptions |
+| `spread_monitor.py` | Bid-ask spread monitoring with statistical anomaly detection |
 | `twap_detector.py` | Interactive CLI for single-ticker local monitoring |
 | `twap_telegram_alerts.py` | Multi-ticker cloud service with Telegram integration |
 | `test_twap_synthetic.py` | Test suite using synthetic data |
@@ -393,7 +400,7 @@ Send these commands to your bot via **direct message** (not in the channel):
 | `telegram_bot_token` | string | Bot token from @BotFather |
 | `telegram_channel_id` | string | Channel ID (usually starts with -100) |
 | `telegram_admin_id` | integer | Your Telegram user ID |
-| `tickers` | array | List of tickers to monitor |
+| `tickers` | array | List of tickers to monitor (use `.S` suffix for spot) |
 | `analysis_interval_sec` | integer | How often to run FFT analysis (default: 30) |
 | `min_buffer_sec` | integer | Minimum data before first analysis (default: 120) |
 | `buffer_minutes` | integer | Trade buffer size (default: 30) |
@@ -401,6 +408,11 @@ Send these commands to your bot via **direct message** (not in the channel):
 | `min_value_major` | integer | Min USD for BTC/ETH/SOL (default: 80000) |
 | `min_value_other` | integer | Min USD for other tickers (default: 40000) |
 | `alert_on_updates` | boolean | Alert when existing TWAP is re-detected |
+| `spread_monitoring` | boolean | Enable spread anomaly detection (default: true) |
+| `spread_z_threshold` | float | Z-score threshold for spread alerts (default: 4.0) |
+| `spread_cooldown_sec` | float | Min seconds between spread alerts (default: 120) |
+| `track_low_confidence` | boolean | Track low-confidence TWAPs for confirmation (default: true) |
+| `confirmation_checks` | integer | Number of checks to confirm low-conf TWAP (default: 3) |
 
 ### Threshold Logic
 
@@ -413,16 +425,27 @@ Send these commands to your bot via **direct message** (not in the channel):
 
 ```json
 {
-  "symbol": "BTCUSDT",
-  "enabled": true
+  "tickers": [
+    {"symbol": "BTCUSDT", "enabled": true},
+    {"symbol": "BTCUSDT.S", "enabled": true}
+  ]
 }
 ```
 
+**Symbol Convention:**
+- `BTCUSDT` = Perpetual Futures
+- `BTCUSDT.S` = Spot Market (note the `.S` suffix)
+
 ### Available Pairs
 
-All Binance Perpetual Futures pairs are supported. Common examples:
+All Binance pairs are supported. Common examples:
+
+**Perpetual Futures:**
 - BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT
 - DOGEUSDT, ADAUSDT, AVAXUSDT, DOTUSDT, MATICUSDT
+
+**Spot Markets (add `.S` suffix):**
+- BTCUSDT.S, ETHUSDT.S, BNBUSDT.S, SOLUSDT.S, XRPUSDT.S
 
 ---
 
@@ -482,6 +505,38 @@ Risk:          52/100
 A major fund is steadily selling, executing ~$19,350 every 30 seconds.
 Signal is moderate (SNR: 4.8); pattern is likely real but monitor for
 confirmation. Risk score 52/100 indicates moderate market influence.
+```
+
+### Confirmed TWAP Alert Example
+
+When `track_low_confidence` is enabled, low-confidence TWAPs are tracked and alerted when confirmed:
+
+```
+✅ CONFIRMED TWAP: ETH-B1 [SPOT]
+
+Ticker:       ETHUSDT.S
+Side:         BUY
+Tracked for:  2.5min (3 checks)
+Confidence:   MEDIUM (SNR: 4.2)
+Interval:     45.0s
+Est. Total:   ~$125,000
+
+Low confidence signal confirmed through persistence
+```
+
+### Spread Anomaly Alert Example
+
+When `spread_monitoring` is enabled, unusual spread changes are detected:
+
+```
+📊 SPREAD WIDENED: BTCUSDT
+
+Current:     2.50 bps
+Normal:      0.80 ± 0.35 bps
+Z-score:     4.9 (SEVERE)
+Bid/Ask:     42150.50 / 42161.05
+
+Spread deviation may indicate liquidity change or large order
 ```
 
 ### TWAP Naming Convention
