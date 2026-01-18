@@ -16,17 +16,13 @@ The FFT converts time-domain trade data into frequency-domain, revealing periodi
 
 ## Supported Markets
 
-### Exchanges
-- **Binance**: Spot and USDT-M Perpetual Futures
-- **Coinbase**: Spot and Perpetual Futures
+### Exchange
+- **Binance**: USDT-M Perpetual Futures only
 
-### Data Sources
+### Data Source
 | Exchange | Market Type | WebSocket Endpoint | Trade Channel |
 |----------|-------------|-------------------|---------------|
-| Binance | Spot | wss://stream.binance.com:9443/ws | `<symbol>@trade` |
-| Binance | Perpetual | wss://fstream.binance.com/ws | `<symbol>@trade` |
-| Coinbase | Spot | wss://ws-feed.exchange.coinbase.com | `matches` channel |
-| Coinbase | Perpetual | wss://ws-feed.exchange.coinbase.com | `matches` channel |
+| Binance | Perpetual | wss://fstream.binance.com/ws | `<symbol>@aggTrade` |
 
 ## Data Requirements
 
@@ -131,17 +127,20 @@ After analysis completes, categorize all detected TWAPs and display summary.
 | `execution/twap_data_collector.py` | WebSocket connections, trade buffering |
 | `execution/twap_fourier_analyzer.py` | FFT analysis, peak detection |
 | `execution/twap_classifier.py` | Categorization logic |
-| `execution/twap_detector.py` | Main CLI interface |
+| `execution/twap_detector.py` | Local CLI interface |
+| `execution/twap_telegram_alerts.py` | Multi-ticker cloud service with Telegram |
 
 ## Usage
 
 ```bash
-# Run the detector
+# Run the local detector
 python execution/twap_detector.py
 
-# Select market type (spot/perpetual) from menu
 # Select token from menu
 # Monitor for TWAPs in real-time
+
+# Run the Telegram alerts service
+python execution/twap_telegram_alerts.py
 ```
 
 ## Environment Variables
@@ -150,8 +149,6 @@ python execution/twap_detector.py
 # Optional - for authenticated endpoints (higher rate limits)
 BINANCE_API_KEY=
 BINANCE_API_SECRET=
-COINBASE_API_KEY=
-COINBASE_API_SECRET=
 ```
 
 ## Learnings & Updates

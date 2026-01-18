@@ -9,6 +9,7 @@ Features:
 - Sends alerts to a Telegram channel
 - Admin commands via DM (authorized user only)
 - Persistent configuration
+- Per-ticker TWAP naming (e.g., BTC-B1, ETH-S2)
 
 Setup:
 1. Create bot via @BotFather -> get TELEGRAM_BOT_TOKEN
@@ -36,7 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from twap_data_collector import TradeCollector, Trade, get_available_pairs
 from twap_fourier_analyzer import TWAPAnalyzer
-from twap_classifier import TWAPClassifier
+from twap_classifier import TWAPClassifier, SizeCategory
 
 
 # =============================================================================
@@ -71,6 +72,7 @@ class Config:
     min_buffer_sec: int = 120
     buffer_minutes: int = 30
     min_confidence: str = "LOW"
+    min_size: str = "MEDIUM"  # Filter out SMALL TWAPs by default
     alert_on_updates: bool = False
 
     def to_dict(self) -> dict:
@@ -83,6 +85,7 @@ class Config:
             "min_buffer_sec": self.min_buffer_sec,
             "buffer_minutes": self.buffer_minutes,
             "min_confidence": self.min_confidence,
+            "min_size": self.min_size,
             "alert_on_updates": self.alert_on_updates,
         }
 
@@ -98,6 +101,7 @@ class Config:
             min_buffer_sec=data.get("min_buffer_sec", 120),
             buffer_minutes=data.get("buffer_minutes", 30),
             min_confidence=data.get("min_confidence", "LOW"),
+            min_size=data.get("min_size", "MEDIUM"),
             alert_on_updates=data.get("alert_on_updates", False),
         )
 
@@ -178,7 +182,7 @@ class TelegramBot:
 
 
 # =============================================================================
-# TWAP Tracking
+# TWAP Tracking with Per-Ticker Naming
 # =============================================================================
 
 @dataclass
@@ -204,33 +208,59 @@ class TrackedTWAP:
 
 
 class TWAPTracker:
-    """Tracks TWAPs across all tickers."""
-
-    NAMES = [
-        "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta",
-        "Iota", "Kappa", "Lambda", "Mu", "Nu", "Xi", "Omicron", "Pi",
-        "Rho", "Sigma", "Tau", "Upsilon", "Phi", "Chi", "Psi", "Omega"
-    ]
+    """Tracks TWAPs with per-ticker naming convention."""
 
     def __init__(self):
-        self.tracked: Dict[str, List[TrackedTWAP]] = {}
-        self.name_index = 0
+        # Per-ticker tracking: {ticker: {side: [TWAPs]}}
+        self.tracked: Dict[str, Dict[str, List[TrackedTWAP]]] = {}
+        # Per-ticker counters: {ticker: {side: count}}
+        self.counters: Dict[str, Dict[str, int]] = {}
+
+    def _get_ticker_code(self, ticker: str) -> str:
+        """Get 3-4 char ticker code. E.g., BTCUSDT -> BTC, ETHUSDT -> ETH"""
+        # Remove common suffixes
+        for suffix in ["USDT", "USD", "BUSD", "USDC"]:
+            if ticker.endswith(suffix):
+                return ticker[:-len(suffix)][:4]
+        return ticker[:4]
+
+    def _get_side_code(self, side: str) -> str:
+        """Get 1 char side code. B=Buy, S=Sell"""
+        return "B" if side.lower() == "buy" else "S"
+
+    def _generate_name(self, ticker: str, side: str) -> str:
+        """Generate name like BTC-B1, ETH-S2"""
+        ticker_code = self._get_ticker_code(ticker)
+        side_code = self._get_side_code(side)
+
+        # Initialize counters if needed
+        if ticker not in self.counters:
+            self.counters[ticker] = {"buy": 0, "sell": 0}
+
+        # Increment counter
+        self.counters[ticker][side.lower()] += 1
+        count = self.counters[ticker][side.lower()]
+
+        return f"{ticker_code}-{side_code}{count}"
 
     def get_or_create(self, ticker: str, side: str, frequency_hz: float) -> tuple:
         """Get existing or create new tracked TWAP. Returns (TrackedTWAP, is_new)."""
         now = datetime.now()
+        side_lower = side.lower()
 
+        # Initialize tracking structures
         if ticker not in self.tracked:
-            self.tracked[ticker] = []
+            self.tracked[ticker] = {"buy": [], "sell": []}
 
-        for twap in self.tracked[ticker]:
+        # Check for existing match
+        for twap in self.tracked[ticker][side_lower]:
             if twap.matches(side, frequency_hz):
                 twap.last_seen = now
                 twap.detection_count += 1
                 return twap, False
 
-        name = self.NAMES[self.name_index % len(self.NAMES)]
-        self.name_index += 1
+        # Create new TWAP with per-ticker name
+        name = self._generate_name(ticker, side)
 
         new_twap = TrackedTWAP(
             name=name,
@@ -240,19 +270,30 @@ class TWAPTracker:
             first_seen=now,
             last_seen=now,
         )
-        self.tracked[ticker].append(new_twap)
+        self.tracked[ticker][side_lower].append(new_twap)
         return new_twap, True
 
     def get_all_active(self) -> List[TrackedTWAP]:
         """Get all active TWAPs across all tickers."""
         result = []
-        for twaps in self.tracked.values():
-            result.extend(twaps)
+        for ticker_twaps in self.tracked.values():
+            for side_twaps in ticker_twaps.values():
+                result.extend(side_twaps)
+        return result
+
+    def get_ticker_active(self, ticker: str) -> List[TrackedTWAP]:
+        """Get active TWAPs for a specific ticker."""
+        if ticker not in self.tracked:
+            return []
+        result = []
+        for side_twaps in self.tracked[ticker].values():
+            result.extend(side_twaps)
         return result
 
     def clear_ticker(self, ticker: str) -> None:
         """Clear tracked TWAPs for a ticker."""
-        self.tracked[ticker] = []
+        self.tracked[ticker] = {"buy": [], "sell": []}
+        self.counters[ticker] = {"buy": 0, "sell": 0}
 
 
 # =============================================================================
@@ -349,9 +390,8 @@ class AlertFormatter:
         d = classified.detection
 
         return (
-            f"🎯 <b>NEW TWAP DETECTED</b>\n"
+            f"🎯 <b>NEW TWAP: {tracked.name}</b>\n"
             f"\n"
-            f"<b>Name:</b> {tracked.name}\n"
             f"<b>Ticker:</b> {ticker}\n"
             f"<b>Side:</b> {d.side.upper()}\n"
             f"<b>Category:</b> {classified.size_category.value} ({classified.urgency_category.value})\n"
@@ -372,7 +412,7 @@ class AlertFormatter:
         duration_str = f"{duration:.0f}s" if duration < 60 else f"{duration/60:.1f}min"
 
         return (
-            f"🔄 <b>TWAP UPDATE: {tracked.name}</b>\n"
+            f"🔄 <b>UPDATE: {tracked.name}</b>\n"
             f"\n"
             f"<b>Ticker:</b> {ticker}\n"
             f"<b>Side:</b> {d.side.upper()}\n"
@@ -382,9 +422,14 @@ class AlertFormatter:
         )
 
     @staticmethod
-    def format_status(monitors: Dict[str, TickerMonitor], tracker: TWAPTracker) -> str:
+    def format_status(monitors: Dict[str, TickerMonitor], tracker: TWAPTracker, paused: bool) -> str:
         """Format status message."""
-        lines = ["📊 <b>TWAP Monitor Status</b>\n"]
+        lines = []
+
+        if paused:
+            lines.append("⏸️ <b>STATUS: PAUSED</b>\n")
+        else:
+            lines.append("📊 <b>TWAP Monitor Status</b>\n")
 
         lines.append(f"<b>Monitoring {len(monitors)} tickers:</b>")
         for symbol, monitor in monitors.items():
@@ -400,7 +445,7 @@ class AlertFormatter:
             for twap in active:
                 duration = (twap.last_seen - twap.first_seen).total_seconds()
                 duration_str = f"{duration:.0f}s" if duration < 60 else f"{duration/60:.1f}min"
-                lines.append(f"  • {twap.name}: {twap.ticker} {twap.side.upper()} ({twap.interval_seconds:.1f}s, {duration_str})")
+                lines.append(f"  • {twap.name}: {twap.interval_seconds:.1f}s interval, {duration_str}")
         else:
             lines.append("\n<i>No active TWAPs detected</i>")
 
@@ -413,6 +458,9 @@ class AlertFormatter:
 
 class TWAPAlertService:
     """Main service that coordinates everything."""
+
+    # Size level ordering for threshold checking
+    SIZE_LEVELS = {"SMALL": 0, "MEDIUM": 1, "LARGE": 2, "WHALE": 3}
 
     def __init__(self, config: Config):
         self.config = config
@@ -432,6 +480,12 @@ class TWAPAlertService:
         levels = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
         return levels.get(confidence.upper(), 0) >= levels.get(self.config.min_confidence.upper(), 0)
 
+    def _size_meets_threshold(self, size_category: SizeCategory) -> bool:
+        """Check if size meets minimum threshold."""
+        size_value = self.SIZE_LEVELS.get(size_category.value.upper(), 0)
+        threshold = self.SIZE_LEVELS.get(self.config.min_size.upper(), 1)
+        return size_value >= threshold
+
     async def start(self) -> None:
         """Start the service."""
         await self.bot.start()
@@ -441,7 +495,14 @@ class TWAPAlertService:
             if ticker_config.enabled:
                 await self._add_monitor(ticker_config.symbol)
 
-        await self.bot.send_admin_message("🟢 TWAP Alert Service started!")
+        tickers_list = ", ".join([t.symbol for t in self.config.tickers if t.enabled])
+        await self.bot.send_admin_message(
+            f"🟢 <b>TWAP Alert Service started!</b>\n\n"
+            f"Monitoring: {tickers_list}\n"
+            f"Min size: {self.config.min_size}\n"
+            f"Min confidence: {self.config.min_confidence}\n\n"
+            f"Send /help for commands"
+        )
 
         await asyncio.gather(
             self._analysis_loop(),
@@ -491,14 +552,19 @@ class TWAPAlertService:
                 results = monitor.analyze()
 
                 for detection, classified in results:
+                    # Skip if doesn't meet confidence threshold
+                    if not self._confidence_meets_threshold(classified.confidence_level.value):
+                        continue
+
+                    # Skip if doesn't meet size threshold (filters out small TWAPs)
+                    if not self._size_meets_threshold(classified.size_category):
+                        continue
+
                     tracked, is_new = self.tracker.get_or_create(
                         symbol,
                         detection.side,
                         detection.frequency_hz,
                     )
-
-                    if not self._confidence_meets_threshold(classified.confidence_level.value):
-                        continue
 
                     if is_new:
                         msg = self.formatter.format_new_twap(symbol, tracked, classified)
@@ -539,30 +605,36 @@ class TWAPAlertService:
             available = ", ".join(get_available_pairs()[:10]) + "..."
             help_text = (
                 "📖 <b>Admin Commands</b>\n\n"
+                "<b>Monitoring:</b>\n"
                 "/status - Show monitoring status\n"
-                "/list - List monitored tickers\n"
-                "/add SYMBOL - Add ticker (e.g., /add BTCUSDT)\n"
-                "/remove SYMBOL - Remove ticker\n"
                 "/pause - Pause monitoring\n"
                 "/resume - Resume monitoring\n"
+                "/shutdown - Stop service (requires systemctl to restart)\n"
+                "\n<b>Tickers:</b>\n"
+                "/list - List monitored tickers\n"
+                "/add SYMBOL - Add ticker (e.g., /add SOLUSDT)\n"
+                "/remove SYMBOL - Remove ticker\n"
+                "\n<b>Config:</b>\n"
                 "/config - Show current config\n"
+                "/setsize LEVEL - Set min size (SMALL/MEDIUM/LARGE/WHALE)\n"
+                "/setconf LEVEL - Set min confidence (LOW/MEDIUM/HIGH)\n"
                 f"\n<b>Available pairs:</b> {available}"
             )
             await self.bot.send_admin_message(help_text)
 
         elif cmd == "/status":
-            msg = self.formatter.format_status(self.monitors, self.tracker)
-            if self.paused:
-                msg = "⏸️ <b>PAUSED</b>\n\n" + msg
+            msg = self.formatter.format_status(self.monitors, self.tracker, self.paused)
             await self.bot.send_admin_message(msg)
 
         elif cmd == "/list":
             if not self.monitors:
                 await self.bot.send_admin_message("No tickers being monitored.")
             else:
-                lines = ["<b>Monitored Tickers (Binance Perp):</b>"]
+                lines = ["<b>Monitored Tickers:</b>"]
                 for symbol in self.monitors:
-                    lines.append(f"• {symbol}")
+                    twaps = self.tracker.get_ticker_active(symbol)
+                    twap_str = f" ({len(twaps)} active)" if twaps else ""
+                    lines.append(f"• {symbol}{twap_str}")
                 await self.bot.send_admin_message("\n".join(lines))
 
         elif cmd == "/add" and len(parts) >= 2:
@@ -586,11 +658,19 @@ class TWAPAlertService:
 
         elif cmd == "/pause":
             self.paused = True
-            await self.bot.send_admin_message("⏸️ Monitoring paused")
+            await self.bot.send_admin_message("⏸️ Monitoring paused. Send /resume to continue.")
+            await self.bot.send_channel_message("⏸️ <i>Monitoring paused by admin</i>")
 
         elif cmd == "/resume":
             self.paused = False
             await self.bot.send_admin_message("▶️ Monitoring resumed")
+            await self.bot.send_channel_message("▶️ <i>Monitoring resumed</i>")
+
+        elif cmd == "/shutdown":
+            await self.bot.send_admin_message("🔴 Shutting down... Use systemctl to restart.")
+            await self.bot.send_channel_message("🔴 <i>Service stopped by admin</i>")
+            await self.stop()
+            sys.exit(0)
 
         elif cmd == "/config":
             msg = (
@@ -598,9 +678,28 @@ class TWAPAlertService:
                 f"Analysis interval: {self.config.analysis_interval_sec}s\n"
                 f"Buffer size: {self.config.buffer_minutes}min\n"
                 f"Min confidence: {self.config.min_confidence}\n"
+                f"Min size: {self.config.min_size}\n"
                 f"Alert on updates: {self.config.alert_on_updates}"
             )
             await self.bot.send_admin_message(msg)
+
+        elif cmd == "/setsize" and len(parts) >= 2:
+            level = parts[1].upper()
+            if level in self.SIZE_LEVELS:
+                self.config.min_size = level
+                self.config.save()
+                await self.bot.send_admin_message(f"✅ Min size set to {level}")
+            else:
+                await self.bot.send_admin_message("❌ Invalid level. Use: SMALL, MEDIUM, LARGE, or WHALE")
+
+        elif cmd == "/setconf" and len(parts) >= 2:
+            level = parts[1].upper()
+            if level in ["LOW", "MEDIUM", "HIGH"]:
+                self.config.min_confidence = level
+                self.config.save()
+                await self.bot.send_admin_message(f"✅ Min confidence set to {level}")
+            else:
+                await self.bot.send_admin_message("❌ Invalid level. Use: LOW, MEDIUM, or HIGH")
 
 
 # =============================================================================

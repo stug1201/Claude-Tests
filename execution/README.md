@@ -212,7 +212,7 @@ You'll see a menu to select a Binance Perpetual trading pair.
 The detector will:
 - Collect trade data (needs ~2 min buffer before first analysis)
 - Run FFT analysis every 30 seconds
-- Display detected TWAPs with names (Alpha, Beta, etc.)
+- Display detected TWAPs with names (e.g., BTC-B1, ETH-S2)
 - Show updates when existing TWAPs are re-detected
 
 Press **Ctrl+C** to stop and see session summary.
@@ -344,16 +344,31 @@ sudo systemctl restart twap-alerts
 
 Send these commands to your bot via **direct message** (not in the channel):
 
+### Monitoring Commands
+
 | Command | Description |
 |---------|-------------|
 | `/help` | Show all commands |
 | `/status` | Show monitoring status and active TWAPs |
-| `/list` | List all monitored tickers |
-| `/add SYMBOL` | Add ticker (e.g., `/add SOLUSDT`) |
-| `/remove SYMBOL` | Remove ticker |
 | `/pause` | Pause all monitoring |
 | `/resume` | Resume monitoring |
+| `/shutdown` | Stop service (requires systemctl to restart) |
+
+### Ticker Management
+
+| Command | Description |
+|---------|-------------|
+| `/list` | List all monitored tickers with active TWAP count |
+| `/add SYMBOL` | Add ticker (e.g., `/add SOLUSDT`) |
+| `/remove SYMBOL` | Remove ticker |
+
+### Configuration Commands
+
+| Command | Description |
+|---------|-------------|
 | `/config` | Show current configuration |
+| `/setsize LEVEL` | Set min size filter: SMALL, MEDIUM, LARGE, WHALE |
+| `/setconf LEVEL` | Set min confidence: LOW, MEDIUM, HIGH |
 
 ### Examples
 
@@ -361,6 +376,8 @@ Send these commands to your bot via **direct message** (not in the channel):
 /add SOLUSDT
 /remove ADAUSDT
 /status
+/setsize MEDIUM
+/setconf LOW
 ```
 
 **Note**: Only messages from the configured `telegram_admin_id` are processed. All other users are ignored.
@@ -381,6 +398,7 @@ Send these commands to your bot via **direct message** (not in the channel):
 | `min_buffer_sec` | integer | Minimum data before first analysis (default: 120) |
 | `buffer_minutes` | integer | Trade buffer size (default: 30) |
 | `min_confidence` | string | Minimum confidence to alert: LOW, MEDIUM, HIGH |
+| `min_size` | string | Minimum size to alert: SMALL, MEDIUM, LARGE, WHALE (default: MEDIUM) |
 | `alert_on_updates` | boolean | Alert when existing TWAP is re-detected |
 
 ### Ticker Configuration
@@ -442,9 +460,8 @@ tail -f /var/log/twap-alerts.log
 ### Detection Alert Example
 
 ```
-🎯 NEW TWAP DETECTED
+🎯 NEW TWAP: BTC-S1
 
-Name:          Alpha
 Ticker:        BTCUSDT
 Side:          SELL
 Category:      Large (Normal)
@@ -459,11 +476,25 @@ Signal is moderate (SNR: 4.8); pattern is likely real but monitor for
 confirmation. Risk score 52/100 indicates moderate market influence.
 ```
 
+### TWAP Naming Convention
+
+Names follow the format: `TICKER-DIRECTION#`
+- **TICKER**: 3-4 letter code (BTC, ETH, SOL, etc.)
+- **DIRECTION**: B = Buy, S = Sell
+- **#**: Order of appearance for that ticker/direction
+
+Examples:
+- `BTC-B1` = First BTC buy TWAP detected
+- `ETH-S2` = Second ETH sell TWAP detected
+- `SOL-B1` = First SOL buy TWAP detected
+
+Each ticker has independent numbering, so BTC and ETH counters don't interfere.
+
 ### Field Explanations
 
 | Field | Meaning |
-|-------|---------||
-| **Name** | Unique identifier for tracking (Alpha, Beta, etc.) |
+|-------|---------|
+| **Name** | Unique identifier for tracking (e.g., BTC-S1, ETH-B2) |
 | **Side** | BUY (accumulation) or SELL (distribution) |
 | **Category** | Size (Small/Medium/Large/Whale) + Urgency (Aggressive/Normal/Passive) |
 | **Interval** | Time between executions (detected from FFT frequency) |
@@ -488,3 +519,72 @@ confirmation. Risk score 52/100 indicates moderate market influence.
 | Aggressive | < 10 seconds |
 | Normal | 10 - 60 seconds |
 | Passive | > 60 seconds |
+
+---
+
+## AWS Maintenance
+
+### After Code Updates
+
+When code changes are pushed to the repository, follow these steps on your EC2 instance:
+
+```bash
+# 1. SSH into your instance
+ssh -i your-key.pem ec2-user@YOUR_EC2_IP
+
+# 2. Navigate to the project directory
+cd ~/Claude-Tests
+
+# 3. Pull the latest changes
+git pull origin claude/instantiate-agents-from-docs-OQfoA
+
+# 4. Restart the service to apply changes
+sudo systemctl restart twap-alerts
+
+# 5. Verify it's running
+sudo systemctl status twap-alerts
+
+# 6. Watch the logs for any errors
+sudo journalctl -u twap-alerts -f
+```
+
+### Quick Restart Commands
+
+```bash
+# Restart service
+sudo systemctl restart twap-alerts
+
+# View status
+sudo systemctl status twap-alerts
+
+# View live logs
+sudo journalctl -u twap-alerts -f
+```
+
+### If Something Goes Wrong
+
+```bash
+# Stop the service
+sudo systemctl stop twap-alerts
+
+# Check recent logs for errors
+sudo journalctl -u twap-alerts -n 100
+
+# Test manually to see error output
+cd ~/Claude-Tests/execution
+source ../venv/bin/activate
+python twap_telegram_alerts.py
+
+# Once fixed, start the service again
+sudo systemctl start twap-alerts
+```
+
+### Updating Config via Telegram
+
+You can change settings without SSH using Telegram commands:
+- `/setsize MEDIUM` - Change minimum TWAP size filter
+- `/setconf LOW` - Change minimum confidence filter
+- `/add SYMBOL` - Add new ticker
+- `/remove SYMBOL` - Remove ticker
+
+Config changes via Telegram are saved automatically and persist across restarts.

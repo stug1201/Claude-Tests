@@ -11,5 +11,6 @@
   "min_buffer_sec": 120,
   "buffer_minutes": 30,
   "min_confidence": "LOW",
+  "min_size": "MEDIUM",
   "alert_on_updates": false
 }
