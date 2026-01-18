@@ -719,7 +719,6 @@ class TWAPAlertService:
 
         tickers_summary = f"{len(perp_list)} perp, {len(spot_list)} spot"
         spread_status = "enabled" if self.config.spread_monitoring else "disabled"
-        confirm_status = f"tracking ({self.config.confirmation_checks} checks)" if self.config.track_low_confidence else "disabled"
 
         # Only send startup message to admin DM, not channel
         await self.bot.send_admin_message(
@@ -728,8 +727,8 @@ class TWAPAlertService:
             f"<b>Major threshold:</b> ${self.config.min_value_major:,}\n"
             f"<b>Other threshold:</b> ${self.config.min_value_other:,}\n"
             f"<b>Min confidence:</b> {self.config.min_confidence}\n"
-            f"<b>Spread monitoring:</b> {spread_status}\n"
-            f"<b>Low-conf TWAPs:</b> {confirm_status}\n\n"
+            f"<b>Confirmation checks:</b> {self.config.confirmation_checks}\n"
+            f"<b>Spread monitoring:</b> {spread_status}\n\n"
             f"Send /help for commands"
         )
 
