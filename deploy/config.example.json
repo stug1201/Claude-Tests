@@ -3,10 +3,9 @@
   "telegram_channel_id": "-1001234567890",
   "telegram_admin_id": 123456789,
   "tickers": [
-    {"symbol": "BTCUSDT", "exchange": "binance", "market_type": "perpetual", "enabled": true},
-    {"symbol": "ETHUSDT", "exchange": "binance", "market_type": "perpetual", "enabled": true},
-    {"symbol": "SOLUSDT", "exchange": "binance", "market_type": "perpetual", "enabled": true},
-    {"symbol": "BTC-USD", "exchange": "coinbase", "market_type": "spot", "enabled": false}
+    {"symbol": "BTCUSDT", "enabled": true},
+    {"symbol": "ETHUSDT", "enabled": true},
+    {"symbol": "SOLUSDT", "enabled": true}
   ],
   "analysis_interval_sec": 30,
   "min_buffer_sec": 120,

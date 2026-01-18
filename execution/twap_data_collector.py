@@ -2,15 +2,13 @@
 """
 TWAP Data Collector
 
-Collects real-time trade data from Binance and Coinbase via WebSocket.
+Collects real-time trade data from Binance Perpetual Futures via WebSocket.
 Maintains a rolling buffer of trades for FFT analysis.
 
 Usage:
     from twap_data_collector import TradeCollector
 
     collector = TradeCollector(
-        exchange="binance",
-        market_type="perpetual",
         symbol="BTCUSDT",
         buffer_minutes=30
     )
@@ -23,20 +21,9 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional
 
 import websockets
-
-
-class Exchange(Enum):
-    BINANCE = "binance"
-    COINBASE = "coinbase"
-
-
-class MarketType(Enum):
-    SPOT = "spot"
-    PERPETUAL = "perpetual"
 
 
 @dataclass
@@ -95,29 +82,21 @@ class TradeBuffer:
         return self.trades[-1].timestamp_ms - self.trades[0].timestamp_ms
 
 
+# Binance Perpetual Futures WebSocket endpoint
+BINANCE_PERP_WS = "wss://fstream.binance.com/ws"
+
+
 class TradeCollector:
     """
-    Collects trades from exchange WebSocket and maintains rolling buffer.
+    Collects trades from Binance Perpetual Futures WebSocket.
     """
-
-    # WebSocket endpoints
-    WS_ENDPOINTS = {
-        (Exchange.BINANCE, MarketType.SPOT): "wss://stream.binance.com:9443/ws",
-        (Exchange.BINANCE, MarketType.PERPETUAL): "wss://fstream.binance.com/ws",
-        (Exchange.COINBASE, MarketType.SPOT): "wss://ws-feed.exchange.coinbase.com",
-        (Exchange.COINBASE, MarketType.PERPETUAL): "wss://ws-feed.exchange.coinbase.com",
-    }
 
     def __init__(
         self,
-        exchange: Union[str, Exchange],
-        market_type: Union[str, MarketType],
         symbol: str,
         buffer_minutes: int = 30,
         on_trade: Optional[Callable[[Trade], None]] = None,
     ):
-        self.exchange = Exchange(exchange) if isinstance(exchange, str) else exchange
-        self.market_type = MarketType(market_type) if isinstance(market_type, str) else market_type
         self.symbol = symbol.upper()
         self.buffer_minutes = buffer_minutes
         self.on_trade = on_trade
@@ -136,46 +115,14 @@ class TradeCollector:
 
     @property
     def ws_url(self) -> str:
-        """Get WebSocket URL for current exchange/market."""
-        base_url = self.WS_ENDPOINTS[(self.exchange, self.market_type)]
+        """Get WebSocket URL for the symbol."""
+        symbol_lower = self.symbol.lower()
+        return f"{BINANCE_PERP_WS}/{symbol_lower}@trade"
 
-        if self.exchange == Exchange.BINANCE:
-            # Binance uses stream-specific URLs
-            symbol_lower = self.symbol.lower()
-            return f"{base_url}/{symbol_lower}@trade"
-        else:
-            # Coinbase uses a single endpoint with subscription
-            return base_url
-
-    def _format_coinbase_symbol(self) -> str:
-        """Convert symbol to Coinbase format (e.g., BTCUSDT -> BTC-USD)."""
-        symbol = self.symbol
-        # Handle common conversions
-        if symbol.endswith("USDT"):
-            base = symbol[:-4]
-            return f"{base}-USD"
-        elif symbol.endswith("USD"):
-            base = symbol[:-3]
-            return f"{base}-USD"
-        elif symbol.endswith("PERP"):
-            base = symbol[:-4]
-            return f"{base}-PERP"
-        return symbol
-
-    async def _subscribe_coinbase(self, ws) -> None:
-        """Send subscription message for Coinbase."""
-        product_id = self._format_coinbase_symbol()
-
-        subscribe_msg = {
-            "type": "subscribe",
-            "product_ids": [product_id],
-            "channels": ["matches"]
-        }
-        await ws.send(json.dumps(subscribe_msg))
-
-    def _parse_binance_trade(self, data: dict) -> Optional[Trade]:
-        """Parse Binance trade message."""
+    def _parse_trade(self, message: str) -> Optional[Trade]:
+        """Parse trade from WebSocket message."""
         try:
+            data = json.loads(message)
             # Binance trade format:
             # {"e":"trade","E":timestamp,"s":"BTCUSDT","t":trade_id,
             #  "p":"price","q":"quantity","b":buyer_order_id,
@@ -186,42 +133,9 @@ class TradeCollector:
                 size=float(data["q"]),
                 side="sell" if data["m"] else "buy"  # m=true means buyer is maker, so taker sold
             )
-        except (KeyError, ValueError) as e:
-            print(f"Error parsing Binance trade: {e}")
+        except (KeyError, ValueError, json.JSONDecodeError) as e:
+            print(f"Error parsing trade: {e}")
             return None
-
-    def _parse_coinbase_trade(self, data: dict) -> Optional[Trade]:
-        """Parse Coinbase trade message."""
-        try:
-            if data.get("type") != "match":
-                return None
-
-            # Coinbase match format:
-            # {"type":"match","trade_id":123,"maker_order_id":"...",
-            #  "taker_order_id":"...","side":"buy","size":"0.1",
-            #  "price":"50000","product_id":"BTC-USD","time":"..."}
-            timestamp = datetime.fromisoformat(data["time"].replace("Z", "+00:00"))
-            return Trade(
-                timestamp_ms=int(timestamp.timestamp() * 1000),
-                price=float(data["price"]),
-                size=float(data["size"]),
-                side=data["side"]
-            )
-        except (KeyError, ValueError) as e:
-            print(f"Error parsing Coinbase trade: {e}")
-            return None
-
-    def _parse_trade(self, message: str) -> Optional[Trade]:
-        """Parse trade from WebSocket message."""
-        try:
-            data = json.loads(message)
-        except json.JSONDecodeError:
-            return None
-
-        if self.exchange == Exchange.BINANCE:
-            return self._parse_binance_trade(data)
-        else:
-            return self._parse_coinbase_trade(data)
 
     async def _connect(self) -> None:
         """Establish WebSocket connection."""
@@ -230,10 +144,6 @@ class TradeCollector:
             ping_interval=20,
             ping_timeout=10,
         )
-
-        # Coinbase requires explicit subscription
-        if self.exchange == Exchange.COINBASE:
-            await self._subscribe_coinbase(self._ws)
 
     async def _listen(self) -> None:
         """Listen for trades and add to buffer."""
@@ -257,7 +167,7 @@ class TradeCollector:
         self._running = True
         self.start_time = datetime.now()
 
-        print(f"Connecting to {self.exchange.value} {self.market_type.value} for {self.symbol}...")
+        print(f"Connecting to Binance Perpetual for {self.symbol}...")
 
         while self._running:
             try:
@@ -313,43 +223,18 @@ class TradeCollector:
         }
 
 
-# Available trading pairs (commonly traded)
-BINANCE_SPOT_PAIRS = [
+# Available Binance Perpetual pairs
+AVAILABLE_PAIRS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
     "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "MATICUSDT",
     "LINKUSDT", "LTCUSDT", "ATOMUSDT", "UNIUSDT", "ARBUSDT",
-]
-
-BINANCE_PERP_PAIRS = [
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "MATICUSDT",
-    "LINKUSDT", "LTCUSDT", "ATOMUSDT", "UNIUSDT", "ARBUSDT",
-]
-
-COINBASE_SPOT_PAIRS = [
-    "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD",
-    "ADA-USD", "AVAX-USD", "DOT-USD", "MATIC-USD", "LINK-USD",
-    "LTC-USD", "ATOM-USD", "UNI-USD", "ARB-USD", "OP-USD",
-]
-
-COINBASE_PERP_PAIRS = [
-    "BTC-PERP", "ETH-PERP", "SOL-PERP", "XRP-PERP", "DOGE-PERP",
-    "AVAX-PERP", "MATIC-PERP", "LINK-PERP", "LTC-PERP", "ARB-PERP",
+    "OPUSDT", "APTUSDT", "NEARUSDT", "FTMUSDT", "SANDUSDT",
 ]
 
 
-def get_available_pairs(exchange: Exchange, market_type: MarketType) -> List[str]:
-    """Get available trading pairs for exchange/market combination."""
-    if exchange == Exchange.BINANCE:
-        if market_type == MarketType.SPOT:
-            return BINANCE_SPOT_PAIRS
-        else:
-            return BINANCE_PERP_PAIRS
-    else:
-        if market_type == MarketType.SPOT:
-            return COINBASE_SPOT_PAIRS
-        else:
-            return COINBASE_PERP_PAIRS
+def get_available_pairs() -> List[str]:
+    """Get available Binance Perpetual trading pairs."""
+    return AVAILABLE_PAIRS
 
 
 async def main():
@@ -358,8 +243,6 @@ async def main():
         print(f"  {trade.side.upper():4} {trade.size:.6f} @ ${trade.price:.2f}")
 
     collector = TradeCollector(
-        exchange="binance",
-        market_type="perpetual",
         symbol="BTCUSDT",
         buffer_minutes=5,
         on_trade=on_trade,

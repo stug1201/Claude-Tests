@@ -2,7 +2,7 @@
 """
 TWAP Telegram Alerts
 
-Multi-ticker TWAP detection with Telegram alerts and admin commands.
+Multi-ticker TWAP detection on Binance Perpetual Futures with Telegram alerts.
 
 Features:
 - Monitors multiple tickers simultaneously
@@ -14,7 +14,7 @@ Setup:
 1. Create bot via @BotFather -> get TELEGRAM_BOT_TOKEN
 2. Create channel -> add bot as admin -> get TELEGRAM_CHANNEL_ID
 3. Get your user ID via @userinfobot -> set as TELEGRAM_ADMIN_ID
-4. Configure in config.json or environment variables
+4. Configure in config.json
 
 Usage:
     python twap_telegram_alerts.py
@@ -27,14 +27,14 @@ import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 
 import aiohttp
 
 # Add execution directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from twap_data_collector import TradeCollector, Exchange, MarketType, Trade
+from twap_data_collector import TradeCollector, Trade, get_available_pairs
 from twap_fourier_analyzer import TWAPAnalyzer
 from twap_classifier import TWAPClassifier
 
@@ -47,8 +47,6 @@ from twap_classifier import TWAPClassifier
 class TickerConfig:
     """Configuration for a single ticker to monitor."""
     symbol: str
-    exchange: str  # "binance" or "coinbase"
-    market_type: str  # "spot" or "perpetual"
     enabled: bool = True
 
     def to_dict(self) -> dict:
@@ -56,7 +54,10 @@ class TickerConfig:
 
     @classmethod
     def from_dict(cls, data: dict) -> "TickerConfig":
-        return cls(**data)
+        return cls(
+            symbol=data["symbol"],
+            enabled=data.get("enabled", True)
+        )
 
 
 @dataclass
@@ -69,8 +70,8 @@ class Config:
     analysis_interval_sec: int = 30
     min_buffer_sec: int = 120
     buffer_minutes: int = 30
-    min_confidence: str = "LOW"  # Minimum confidence to alert: LOW, MEDIUM, HIGH
-    alert_on_updates: bool = False  # Alert on TWAP updates, not just new detections
+    min_confidence: str = "LOW"
+    alert_on_updates: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -212,7 +213,7 @@ class TWAPTracker:
     ]
 
     def __init__(self):
-        self.tracked: Dict[str, List[TrackedTWAP]] = {}  # ticker -> list of TWAPs
+        self.tracked: Dict[str, List[TrackedTWAP]] = {}
         self.name_index = 0
 
     def get_or_create(self, ticker: str, side: str, frequency_hz: float) -> tuple:
@@ -222,14 +223,12 @@ class TWAPTracker:
         if ticker not in self.tracked:
             self.tracked[ticker] = []
 
-        # Check for match
         for twap in self.tracked[ticker]:
             if twap.matches(side, frequency_hz):
                 twap.last_seen = now
                 twap.detection_count += 1
                 return twap, False
 
-        # Create new
         name = self.NAMES[self.name_index % len(self.NAMES)]
         self.name_index += 1
 
@@ -265,12 +264,12 @@ class TickerMonitor:
 
     def __init__(
         self,
-        config: TickerConfig,
+        symbol: str,
         buffer_minutes: int,
         analysis_interval_sec: int,
         min_buffer_sec: int,
     ):
-        self.config = config
+        self.symbol = symbol
         self.buffer_minutes = buffer_minutes
         self.analysis_interval_sec = analysis_interval_sec
         self.min_buffer_sec = min_buffer_sec
@@ -280,16 +279,10 @@ class TickerMonitor:
         self.running = False
         self.last_analysis = datetime.now()
 
-    @property
-    def ticker_id(self) -> str:
-        return f"{self.config.exchange}:{self.config.market_type}:{self.config.symbol}"
-
     async def start(self) -> None:
         """Start the collector."""
         self.collector = TradeCollector(
-            exchange=self.config.exchange,
-            market_type=self.config.market_type,
-            symbol=self.config.symbol,
+            symbol=self.symbol,
             buffer_minutes=self.buffer_minutes,
         )
         self.running = True
@@ -351,14 +344,9 @@ class AlertFormatter:
     """Formats TWAP alerts for Telegram."""
 
     @staticmethod
-    def format_new_twap(
-        ticker: str,
-        tracked: TrackedTWAP,
-        classified,
-    ) -> str:
+    def format_new_twap(ticker: str, tracked: TrackedTWAP, classified) -> str:
         """Format a new TWAP detection alert."""
         d = classified.detection
-        c = classified
 
         return (
             f"🎯 <b>NEW TWAP DETECTED</b>\n"
@@ -366,22 +354,18 @@ class AlertFormatter:
             f"<b>Name:</b> {tracked.name}\n"
             f"<b>Ticker:</b> {ticker}\n"
             f"<b>Side:</b> {d.side.upper()}\n"
-            f"<b>Category:</b> {c.size_category.value} ({c.urgency_category.value})\n"
+            f"<b>Category:</b> {classified.size_category.value} ({classified.urgency_category.value})\n"
             f"<b>Interval:</b> {d.interval_seconds:.1f}s\n"
             f"<b>Per-exec:</b> {d.estimated_per_execution_size:.6f} (~${d.estimated_per_execution_value:,.0f})\n"
             f"<b>Est. Total:</b> ~${d.estimated_total_value:,.0f}\n"
-            f"<b>Confidence:</b> {c.confidence_level.value} (SNR: {d.snr:.1f})\n"
-            f"<b>Risk:</b> {c.risk_score:.0f}/100\n"
+            f"<b>Confidence:</b> {classified.confidence_level.value} (SNR: {d.snr:.1f})\n"
+            f"<b>Risk:</b> {classified.risk_score:.0f}/100\n"
             f"\n"
-            f"<i>{c.description}</i>"
+            f"<i>{classified.description}</i>"
         )
 
     @staticmethod
-    def format_twap_update(
-        ticker: str,
-        tracked: TrackedTWAP,
-        classified,
-    ) -> str:
+    def format_twap_update(ticker: str, tracked: TrackedTWAP, classified) -> str:
         """Format a TWAP update alert."""
         d = classified.detection
         duration = (tracked.last_seen - tracked.first_seen).total_seconds()
@@ -402,23 +386,21 @@ class AlertFormatter:
         """Format status message."""
         lines = ["📊 <b>TWAP Monitor Status</b>\n"]
 
-        # Monitored tickers
         lines.append(f"<b>Monitoring {len(monitors)} tickers:</b>")
-        for ticker_id, monitor in monitors.items():
+        for symbol, monitor in monitors.items():
             stats = monitor.get_stats()
             trades = stats.get("trades_in_buffer", 0)
             buffer = stats.get("buffer_duration_sec", 0)
             status = "🟢" if monitor.running and buffer > 60 else "🟡"
-            lines.append(f"  {status} {monitor.config.symbol} ({monitor.config.exchange}): {trades} trades, {buffer:.0f}s buffer")
+            lines.append(f"  {status} {symbol}: {trades} trades, {buffer:.0f}s buffer")
 
-        # Active TWAPs
         active = tracker.get_all_active()
         if active:
             lines.append(f"\n<b>Active TWAPs ({len(active)}):</b>")
             for twap in active:
                 duration = (twap.last_seen - twap.first_seen).total_seconds()
                 duration_str = f"{duration:.0f}s" if duration < 60 else f"{duration/60:.1f}min"
-                lines.append(f"  • {twap.name}: {twap.ticker} {twap.side.upper()} ({twap.interval_seconds:.1f}s interval, {duration_str})")
+                lines.append(f"  • {twap.name}: {twap.ticker} {twap.side.upper()} ({twap.interval_seconds:.1f}s, {duration_str})")
         else:
             lines.append("\n<i>No active TWAPs detected</i>")
 
@@ -455,14 +437,12 @@ class TWAPAlertService:
         await self.bot.start()
         self.running = True
 
-        # Start monitors for enabled tickers
         for ticker_config in self.config.tickers:
             if ticker_config.enabled:
-                await self._add_monitor(ticker_config)
+                await self._add_monitor(ticker_config.symbol)
 
         await self.bot.send_admin_message("🟢 TWAP Alert Service started!")
 
-        # Run main loops
         await asyncio.gather(
             self._analysis_loop(),
             self._command_loop(),
@@ -476,23 +456,23 @@ class TWAPAlertService:
         await self.bot.send_admin_message("🔴 TWAP Alert Service stopped.")
         await self.bot.stop()
 
-    async def _add_monitor(self, ticker_config: TickerConfig) -> None:
+    async def _add_monitor(self, symbol: str) -> None:
         """Add a ticker monitor."""
         monitor = TickerMonitor(
-            config=ticker_config,
+            symbol=symbol,
             buffer_minutes=self.config.buffer_minutes,
             analysis_interval_sec=self.config.analysis_interval_sec,
             min_buffer_sec=self.config.min_buffer_sec,
         )
-        self.monitors[monitor.ticker_id] = monitor
+        self.monitors[symbol] = monitor
         asyncio.create_task(monitor.start())
 
-    async def _remove_monitor(self, ticker_id: str) -> bool:
+    async def _remove_monitor(self, symbol: str) -> bool:
         """Remove a ticker monitor."""
-        if ticker_id in self.monitors:
-            await self.monitors[ticker_id].stop()
-            del self.monitors[ticker_id]
-            self.tracker.clear_ticker(ticker_id)
+        if symbol in self.monitors:
+            await self.monitors[symbol].stop()
+            del self.monitors[symbol]
+            self.tracker.clear_ticker(symbol)
             return True
         return False
 
@@ -504,7 +484,7 @@ class TWAPAlertService:
             if self.paused:
                 continue
 
-            for ticker_id, monitor in list(self.monitors.items()):
+            for symbol, monitor in list(self.monitors.items()):
                 if not monitor.should_analyze():
                     continue
 
@@ -512,21 +492,19 @@ class TWAPAlertService:
 
                 for detection, classified in results:
                     tracked, is_new = self.tracker.get_or_create(
-                        ticker_id,
+                        symbol,
                         detection.side,
                         detection.frequency_hz,
                     )
 
-                    # Check confidence threshold
                     if not self._confidence_meets_threshold(classified.confidence_level.value):
                         continue
 
-                    # Send alert
                     if is_new:
-                        msg = self.formatter.format_new_twap(ticker_id, tracked, classified)
+                        msg = self.formatter.format_new_twap(symbol, tracked, classified)
                         await self.bot.send_channel_message(msg)
                     elif self.config.alert_on_updates:
-                        msg = self.formatter.format_twap_update(ticker_id, tracked, classified)
+                        msg = self.formatter.format_twap_update(symbol, tracked, classified)
                         await self.bot.send_channel_message(msg)
 
     async def _command_loop(self) -> None:
@@ -558,16 +536,17 @@ class TWAPAlertService:
         cmd = parts[0].lower()
 
         if cmd == "/help":
+            available = ", ".join(get_available_pairs()[:10]) + "..."
             help_text = (
                 "📖 <b>Admin Commands</b>\n\n"
                 "/status - Show monitoring status\n"
                 "/list - List monitored tickers\n"
-                "/add SYMBOL EXCHANGE TYPE - Add ticker\n"
-                "  Example: /add BTCUSDT binance perp\n"
+                "/add SYMBOL - Add ticker (e.g., /add BTCUSDT)\n"
                 "/remove SYMBOL - Remove ticker\n"
                 "/pause - Pause monitoring\n"
                 "/resume - Resume monitoring\n"
                 "/config - Show current config\n"
+                f"\n<b>Available pairs:</b> {available}"
             )
             await self.bot.send_admin_message(help_text)
 
@@ -581,38 +560,28 @@ class TWAPAlertService:
             if not self.monitors:
                 await self.bot.send_admin_message("No tickers being monitored.")
             else:
-                lines = ["<b>Monitored Tickers:</b>"]
-                for tid, m in self.monitors.items():
-                    lines.append(f"• {m.config.symbol} ({m.config.exchange} {m.config.market_type})")
+                lines = ["<b>Monitored Tickers (Binance Perp):</b>"]
+                for symbol in self.monitors:
+                    lines.append(f"• {symbol}")
                 await self.bot.send_admin_message("\n".join(lines))
 
-        elif cmd == "/add" and len(parts) >= 4:
+        elif cmd == "/add" and len(parts) >= 2:
             symbol = parts[1].upper()
-            exchange = parts[2].lower()
-            market_type = "perpetual" if parts[3].lower() in ("perp", "perpetual", "futures") else "spot"
-
-            ticker_config = TickerConfig(
-                symbol=symbol,
-                exchange=exchange,
-                market_type=market_type,
-            )
-            await self._add_monitor(ticker_config)
-            self.config.tickers.append(ticker_config)
-            self.config.save()
-            await self.bot.send_admin_message(f"✅ Added {symbol} ({exchange} {market_type})")
+            if symbol in self.monitors:
+                await self.bot.send_admin_message(f"❌ {symbol} already being monitored")
+            else:
+                await self._add_monitor(symbol)
+                self.config.tickers.append(TickerConfig(symbol=symbol))
+                self.config.save()
+                await self.bot.send_admin_message(f"✅ Added {symbol}")
 
         elif cmd == "/remove" and len(parts) >= 2:
             symbol = parts[1].upper()
-            removed = False
-            for tid in list(self.monitors.keys()):
-                if symbol in tid:
-                    await self._remove_monitor(tid)
-                    self.config.tickers = [t for t in self.config.tickers if t.symbol != symbol]
-                    self.config.save()
-                    removed = True
-                    await self.bot.send_admin_message(f"✅ Removed {symbol}")
-                    break
-            if not removed:
+            if await self._remove_monitor(symbol):
+                self.config.tickers = [t for t in self.config.tickers if t.symbol != symbol]
+                self.config.save()
+                await self.bot.send_admin_message(f"✅ Removed {symbol}")
+            else:
                 await self.bot.send_admin_message(f"❌ Ticker {symbol} not found")
 
         elif cmd == "/pause":
@@ -643,10 +612,10 @@ def create_default_config() -> None:
     config = Config(
         telegram_bot_token="YOUR_BOT_TOKEN",
         telegram_channel_id="YOUR_CHANNEL_ID",
-        telegram_admin_id=0,  # Your Telegram user ID
+        telegram_admin_id=0,
         tickers=[
-            TickerConfig("BTCUSDT", "binance", "perpetual"),
-            TickerConfig("ETHUSDT", "binance", "perpetual"),
+            TickerConfig("BTCUSDT"),
+            TickerConfig("ETHUSDT"),
         ],
     )
     config.save("config.json")

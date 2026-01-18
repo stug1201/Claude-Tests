@@ -1,6 +1,6 @@
 # TWAP Detection System
 
-Real-time detection of Time-Weighted Average Price (TWAP) algorithmic orders on cryptocurrency exchanges using Fourier Transform analysis.
+Real-time detection of Time-Weighted Average Price (TWAP) algorithmic orders on Binance Perpetual Futures using Fourier Transform analysis.
 
 ## Table of Contents
 
@@ -22,7 +22,7 @@ TWAP (Time-Weighted Average Price) is an algorithmic execution strategy that spl
 
 ### What This System Does
 
-- Connects to Binance/Coinbase WebSocket feeds
+- Connects to Binance Perpetual Futures WebSocket feeds
 - Collects real-time trade data
 - Analyzes trade flow using Fast Fourier Transform (FFT)
 - Detects periodic execution patterns indicative of TWAP orders
@@ -127,8 +127,8 @@ Random market noise is aperiodic and creates a relatively flat power spectrum. T
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────┐     ┌──────────────────────┐
-│  twap_data_collector │     │  Exchange WebSocket  │
-│  ──────────────────  │◄────│  (Binance/Coinbase)  │
+│  twap_data_collector │     │   Binance WebSocket  │
+│  ──────────────────  │◄────│  (Perpetual Futures) │
 │  - TradeCollector    │     └──────────────────────┘
 │  - TradeBuffer       │
 │  - Trade dataclass   │
@@ -170,7 +170,7 @@ Random market noise is aperiodic and creates a relatively flat power spectrum. T
 
 | File | Purpose |
 |------|---------|
-| `twap_data_collector.py` | WebSocket connection, trade buffering, exchange abstraction |
+| `twap_data_collector.py` | WebSocket connection, trade buffering |
 | `twap_fourier_analyzer.py` | FFT analysis, peak detection, TWAP detection logic |
 | `twap_classifier.py` | Classification by size/urgency, risk scoring, descriptions |
 | `twap_detector.py` | Interactive CLI for single-ticker local monitoring |
@@ -207,10 +207,7 @@ pip install -r requirements.txt
 python execution/twap_detector.py
 ```
 
-You'll see menus to select:
-1. Exchange (Binance / Coinbase)
-2. Market type (Spot / Perpetual)
-3. Token (from list or custom)
+You'll see a menu to select a Binance Perpetual trading pair.
 
 The detector will:
 - Collect trade data (needs ~2 min buffer before first analysis)
@@ -262,8 +259,8 @@ Create `config.json` in the execution folder:
   "telegram_channel_id": "-100YOUR_CHANNEL_ID",
   "telegram_admin_id": YOUR_USER_ID,
   "tickers": [
-    {"symbol": "BTCUSDT", "exchange": "binance", "market_type": "perpetual", "enabled": true},
-    {"symbol": "ETHUSDT", "exchange": "binance", "market_type": "perpetual", "enabled": true}
+    {"symbol": "BTCUSDT", "enabled": true},
+    {"symbol": "ETHUSDT", "enabled": true}
   ],
   "min_confidence": "LOW",
   "alert_on_updates": false
@@ -352,7 +349,7 @@ Send these commands to your bot via **direct message** (not in the channel):
 | `/help` | Show all commands |
 | `/status` | Show monitoring status and active TWAPs |
 | `/list` | List all monitored tickers |
-| `/add SYMBOL EXCHANGE TYPE` | Add ticker (e.g., `/add BTCUSDT binance perp`) |
+| `/add SYMBOL` | Add ticker (e.g., `/add SOLUSDT`) |
 | `/remove SYMBOL` | Remove ticker |
 | `/pause` | Pause all monitoring |
 | `/resume` | Resume monitoring |
@@ -361,9 +358,8 @@ Send these commands to your bot via **direct message** (not in the channel):
 ### Examples
 
 ```
-/add SOLUSDT binance perp
-/add BTC-USD coinbase spot
-/remove SOLUSDT
+/add SOLUSDT
+/remove ADAUSDT
 /status
 ```
 
@@ -392,21 +388,15 @@ Send these commands to your bot via **direct message** (not in the channel):
 ```json
 {
   "symbol": "BTCUSDT",
-  "exchange": "binance",
-  "market_type": "perpetual",
   "enabled": true
 }
 ```
 
-**Exchange values**: `"binance"`, `"coinbase"`
-**Market type values**: `"spot"`, `"perpetual"`
+### Available Pairs
 
-### Supported Markets
-
-| Exchange | Spot | Perpetual |
-|----------|------|-----------|
-| Binance | ✅ | ✅ |
-| Coinbase | ✅ | ✅ |
+All Binance Perpetual Futures pairs are supported. Common examples:
+- BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT
+- DOGEUSDT, ADAUSDT, AVAXUSDT, DOTUSDT, MATICUSDT
 
 ---
 
@@ -416,7 +406,6 @@ Send these commands to your bot via **direct message** (not in the channel):
 
 Binance blocks connections from some cloud provider IPs. Solutions:
 - Try a different AWS region
-- Use Coinbase instead (less restrictive)
 - Use a residential VPN/proxy (advanced)
 
 ### No TWAPs detected
@@ -456,7 +445,7 @@ tail -f /var/log/twap-alerts.log
 🎯 NEW TWAP DETECTED
 
 Name:          Alpha
-Ticker:        binance:perpetual:BTCUSDT
+Ticker:        BTCUSDT
 Side:          SELL
 Category:      Large (Normal)
 Interval:      30.2s
@@ -473,7 +462,7 @@ confirmation. Risk score 52/100 indicates moderate market influence.
 ### Field Explanations
 
 | Field | Meaning |
-|-------|---------|
+|-------|---------||
 | **Name** | Unique identifier for tracking (Alpha, Beta, etc.) |
 | **Side** | BUY (accumulation) or SELL (distribution) |
 | **Category** | Size (Small/Medium/Large/Whale) + Urgency (Aggressive/Normal/Passive) |

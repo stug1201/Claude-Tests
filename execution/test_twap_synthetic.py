@@ -15,8 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 print("Testing imports...")
 try:
     from twap_data_collector import (
-        TradeCollector, Exchange, MarketType, Trade, TradeBuffer,
-        get_available_pairs, BINANCE_SPOT_PAIRS, BINANCE_PERP_PAIRS
+        TradeCollector, Trade, TradeBuffer, get_available_pairs
     )
     print("  twap_data_collector: OK")
 except Exception as e:
@@ -107,13 +106,9 @@ print("Test 2: Collector Configuration")
 print("-" * 40)
 
 collector = TradeCollector(
-    exchange="binance",
-    market_type="perpetual",
     symbol="BTCUSDT",
     buffer_minutes=30,
 )
-print(f"  Exchange: {collector.exchange}")
-print(f"  Market: {collector.market_type}")
 print(f"  Symbol: {collector.symbol}")
 print(f"  WS URL: {collector.ws_url}")
 print("  Collector config: OK")
@@ -124,10 +119,9 @@ print()
 print("Test 3: Available Trading Pairs")
 print("-" * 40)
 
-for exchange in [Exchange.BINANCE, Exchange.COINBASE]:
-    for market in [MarketType.SPOT, MarketType.PERPETUAL]:
-        pairs = get_available_pairs(exchange, market)
-        print(f"  {exchange.value} {market.value}: {len(pairs)} pairs")
+pairs = get_available_pairs()
+print(f"  Binance Perpetual: {len(pairs)} pairs")
+print(f"  Sample: {', '.join(pairs[:5])}")
 print("  Trading pairs: OK")
 print()
 
