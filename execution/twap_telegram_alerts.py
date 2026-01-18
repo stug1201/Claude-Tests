@@ -77,7 +77,7 @@ class Config:
     analysis_interval_sec: int = 30
     min_buffer_sec: int = 120
     buffer_minutes: int = 30
-    min_confidence: str = "LOW"
+    min_confidence: str = "LOW"  # Minimum confidence to post alerts (LOW/MEDIUM/HIGH)
     min_value_major: int = 80000  # USD threshold for BTC/ETH/SOL
     min_value_other: int = 40000  # USD threshold for other tickers
     alert_on_updates: bool = False
@@ -85,9 +85,9 @@ class Config:
     spread_monitoring: bool = True
     spread_z_threshold: float = 6.0  # Z-score threshold for spread anomalies (higher = less sensitive)
     spread_cooldown_sec: float = 300.0  # Minimum seconds between spread alerts (5 min)
-    # Low confidence confirmation tracking
-    track_low_confidence: bool = True
-    confirmation_checks: int = 3  # Number of confirmations needed
+    spread_warmup_sec: float = 300.0  # Spread warmup period in seconds (5 min default)
+    # TWAP confirmation - ALL detections require confirmation_checks repeats before alerting
+    confirmation_checks: int = 3  # Number of repeat detections needed to confirm ANY TWAP
 
     def to_dict(self) -> dict:
         return {
@@ -105,7 +105,7 @@ class Config:
             "spread_monitoring": self.spread_monitoring,
             "spread_z_threshold": self.spread_z_threshold,
             "spread_cooldown_sec": self.spread_cooldown_sec,
-            "track_low_confidence": self.track_low_confidence,
+            "spread_warmup_sec": self.spread_warmup_sec,
             "confirmation_checks": self.confirmation_checks,
         }
 
@@ -127,7 +127,7 @@ class Config:
             spread_monitoring=data.get("spread_monitoring", True),
             spread_z_threshold=data.get("spread_z_threshold", 6.0),
             spread_cooldown_sec=data.get("spread_cooldown_sec", 300.0),
-            track_low_confidence=data.get("track_low_confidence", True),
+            spread_warmup_sec=data.get("spread_warmup_sec", 300.0),
             confirmation_checks=data.get("confirmation_checks", 3),
         )
 
@@ -260,7 +260,7 @@ class TrackedTWAP:
 
 @dataclass
 class PendingTWAP:
-    """Low confidence TWAP being tracked for confirmation."""
+    """TWAP being tracked for confirmation (applies to ALL detections)."""
     ticker: str
     side: str
     frequency_hz: float
@@ -283,20 +283,25 @@ class PendingTWAP:
 
 
 class TWAPTracker:
-    """Tracks TWAPs with per-ticker naming convention."""
+    """
+    Tracks TWAPs with per-ticker naming convention.
+
+    All detections require confirmation_checks consecutive detections before
+    being confirmed and alerting. This applies to LOW, MEDIUM, and HIGH
+    confidence detections equally.
+    """
 
     def __init__(self, confirmation_checks: int = 3):
-        # Per-ticker tracking: {ticker: {side: [TWAPs]}}
-        self.tracked: Dict[str, Dict[str, List[TrackedTWAP]]] = {}
-        # Per-ticker counters: {ticker: {side: count}}
+        # Confirmed TWAPs: {ticker: {side: [TWAPs]}}
+        self.confirmed: Dict[str, Dict[str, List[TrackedTWAP]]] = {}
+        # Per-ticker counters for naming: {ticker: {side: count}}
         self.counters: Dict[str, Dict[str, int]] = {}
-        # Pending low-confidence TWAPs awaiting confirmation
+        # Pending TWAPs awaiting confirmation (ALL detections start here)
         self.pending: Dict[str, Dict[str, List[PendingTWAP]]] = {}
         self.confirmation_checks = confirmation_checks
 
     def _get_ticker_code(self, ticker: str) -> str:
         """Get 3-4 char ticker code. E.g., BTCUSDT -> BTC, ETHUSDT -> ETH"""
-        # Remove common suffixes
         for suffix in ["USDT", "USD", "BUSD", "USDC"]:
             if ticker.endswith(suffix):
                 return ticker[:-len(suffix)][:4]
@@ -311,124 +316,126 @@ class TWAPTracker:
         ticker_code = self._get_ticker_code(ticker)
         side_code = self._get_side_code(side)
 
-        # Initialize counters if needed
         if ticker not in self.counters:
             self.counters[ticker] = {"buy": 0, "sell": 0}
 
-        # Increment counter
         self.counters[ticker][side.lower()] += 1
         count = self.counters[ticker][side.lower()]
 
         return f"{ticker_code}-{side_code}{count}"
 
-    def get_or_create(self, ticker: str, side: str, frequency_hz: float) -> tuple:
-        """Get existing or create new tracked TWAP. Returns (TrackedTWAP, is_new)."""
+    def track_detection(self, ticker: str, side: str, frequency_hz: float, snr: float,
+                        confidence: str, classified) -> tuple:
+        """
+        Track a TWAP detection for confirmation.
+
+        ALL detections go through the pending system and require confirmation_checks
+        consecutive detections before being confirmed.
+
+        Returns (pending_twap, is_newly_confirmed, already_confirmed) tuple.
+        - is_newly_confirmed: True if this detection just reached confirmation threshold
+        - already_confirmed: True if this TWAP was already confirmed previously
+        """
         now = datetime.now()
         side_lower = side.lower()
 
-        # Initialize tracking structures
-        if ticker not in self.tracked:
-            self.tracked[ticker] = {"buy": [], "sell": []}
+        # Initialize structures
+        if ticker not in self.pending:
+            self.pending[ticker] = {"buy": [], "sell": []}
+        if ticker not in self.confirmed:
+            self.confirmed[ticker] = {"buy": [], "sell": []}
 
-        # Check for existing match
-        for twap in self.tracked[ticker][side_lower]:
+        # First check if already confirmed (existing TWAP)
+        for twap in self.confirmed[ticker][side_lower]:
             if twap.matches(side, frequency_hz):
                 twap.last_seen = now
                 twap.detection_count += 1
-                return twap, False
+                # Update best confidence if improved
+                conf_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+                if conf_order.get(confidence.upper(), 0) > conf_order.get(twap.best_confidence, 0):
+                    twap.best_confidence = confidence
+                # Return a pseudo-pending for the classified data
+                pseudo_pending = PendingTWAP(
+                    ticker=ticker, side=side, frequency_hz=frequency_hz,
+                    first_seen=twap.first_seen, last_seen=now,
+                    checks=twap.detection_count, best_snr=snr,
+                    best_confidence=twap.best_confidence, last_classified=classified
+                )
+                return pseudo_pending, False, True  # Already confirmed
 
-        # Create new TWAP with per-ticker name
-        name = self._generate_name(ticker, side)
-
-        new_twap = TrackedTWAP(
-            name=name,
-            ticker=ticker,
-            side=side,
-            frequency_hz=frequency_hz,
-            first_seen=now,
-            last_seen=now,
-        )
-        self.tracked[ticker][side_lower].append(new_twap)
-        return new_twap, True
-
-    def get_all_active(self) -> List[TrackedTWAP]:
-        """Get all active TWAPs across all tickers."""
-        result = []
-        for ticker_twaps in self.tracked.values():
-            for side_twaps in ticker_twaps.values():
-                result.extend(side_twaps)
-        return result
-
-    def get_ticker_active(self, ticker: str) -> List[TrackedTWAP]:
-        """Get active TWAPs for a specific ticker."""
-        if ticker not in self.tracked:
-            return []
-        result = []
-        for side_twaps in self.tracked[ticker].values():
-            result.extend(side_twaps)
-        return result
-
-    def clear_ticker(self, ticker: str) -> None:
-        """Clear tracked TWAPs for a ticker."""
-        self.tracked[ticker] = {"buy": [], "sell": []}
-        self.counters[ticker] = {"buy": 0, "sell": 0}
-        self.pending[ticker] = {"buy": [], "sell": []}
-
-    def track_pending(self, ticker: str, side: str, frequency_hz: float, snr: float,
-                      confidence: str, classified) -> tuple:
-        """
-        Track a pending low-confidence TWAP for confirmation.
-        Returns (pending_twap, is_confirmed, should_alert) tuple.
-        - is_confirmed: True if this check confirms the TWAP
-        - should_alert: True if confidence improved and should alert
-        """
-        now = datetime.now()
-        side_lower = side.lower()
-
-        # Initialize if needed
-        if ticker not in self.pending:
-            self.pending[ticker] = {"buy": [], "sell": []}
-
-        # Check for existing pending match
+        # Check pending TWAPs
         for pending in self.pending[ticker][side_lower]:
             if pending.matches(side, frequency_hz):
                 pending.last_seen = now
                 pending.checks += 1
                 pending.last_classified = classified
 
-                # Track best SNR/confidence seen
-                old_confidence = pending.best_confidence
-                confidence_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+                # Track best SNR/confidence
+                conf_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
                 if snr > pending.best_snr:
                     pending.best_snr = snr
-                if confidence_order.get(confidence.upper(), 0) > confidence_order.get(pending.best_confidence, 0):
+                if conf_order.get(confidence.upper(), 0) > conf_order.get(pending.best_confidence, 0):
                     pending.best_confidence = confidence
 
-                # Check if confirmed (enough checks or confidence improved to MEDIUM+)
-                is_confirmed = pending.checks >= self.confirmation_checks
-                should_alert = (pending.best_confidence in ["MEDIUM", "HIGH"] and
-                               old_confidence == "LOW")
-
-                if is_confirmed or should_alert:
-                    # Remove from pending
+                # Check if confirmed
+                if pending.checks >= self.confirmation_checks:
+                    # Promote to confirmed
                     self.pending[ticker][side_lower].remove(pending)
+                    name = self._generate_name(ticker, side)
+                    new_twap = TrackedTWAP(
+                        name=name, ticker=ticker, side=side,
+                        frequency_hz=frequency_hz,
+                        first_seen=pending.first_seen, last_seen=now,
+                        detection_count=pending.checks,
+                        best_confidence=pending.best_confidence,
+                    )
+                    self.confirmed[ticker][side_lower].append(new_twap)
+                    return pending, True, False  # Newly confirmed
 
-                return pending, is_confirmed, should_alert
+                return pending, False, False  # Still pending
 
         # Create new pending TWAP
         new_pending = PendingTWAP(
-            ticker=ticker,
-            side=side,
-            frequency_hz=frequency_hz,
-            first_seen=now,
-            last_seen=now,
-            checks=1,
-            best_snr=snr,
-            best_confidence=confidence,
+            ticker=ticker, side=side, frequency_hz=frequency_hz,
+            first_seen=now, last_seen=now,
+            checks=1, best_snr=snr, best_confidence=confidence,
             last_classified=classified,
         )
         self.pending[ticker][side_lower].append(new_pending)
         return new_pending, False, False
+
+    def get_confirmed_twap(self, ticker: str, side: str, frequency_hz: float) -> Optional[TrackedTWAP]:
+        """Get a confirmed TWAP if it exists."""
+        if ticker not in self.confirmed:
+            return None
+        side_lower = side.lower()
+        for twap in self.confirmed[ticker].get(side_lower, []):
+            if twap.matches(side, frequency_hz):
+                return twap
+        return None
+
+    def get_all_active(self) -> List[TrackedTWAP]:
+        """Get all confirmed TWAPs across all tickers."""
+        result = []
+        for ticker_twaps in self.confirmed.values():
+            for side_twaps in ticker_twaps.values():
+                result.extend(side_twaps)
+        return result
+
+    def get_ticker_active(self, ticker: str) -> List[TrackedTWAP]:
+        """Get confirmed TWAPs for a specific ticker."""
+        if ticker not in self.confirmed:
+            return []
+        result = []
+        for side_twaps in self.confirmed[ticker].values():
+            result.extend(side_twaps)
+        return result
+
+    def clear_ticker(self, ticker: str) -> None:
+        """Clear tracked TWAPs for a ticker."""
+        self.confirmed[ticker] = {"buy": [], "sell": []}
+        self.counters[ticker] = {"buy": 0, "sell": 0}
+        self.pending[ticker] = {"buy": [], "sell": []}
 
     def get_pending_count(self) -> int:
         """Get total number of pending TWAPs across all tickers."""
@@ -437,6 +444,10 @@ class TWAPTracker:
             for side_pending in ticker_pending.values():
                 count += len(side_pending)
         return count
+
+    def set_confirmation_checks(self, checks: int) -> None:
+        """Update the number of confirmation checks required."""
+        self.confirmation_checks = max(1, checks)
 
 
 # =============================================================================
@@ -452,6 +463,7 @@ class TickerMonitor:
         buffer_minutes: int,
         analysis_interval_sec: int,
         min_buffer_sec: int,
+        base_threshold: Optional[int] = None,
     ):
         self.symbol = symbol
         self.buffer_minutes = buffer_minutes
@@ -459,7 +471,8 @@ class TickerMonitor:
         self.min_buffer_sec = min_buffer_sec
 
         self.collector: Optional[TradeCollector] = None
-        self.classifier = TWAPClassifier()
+        # Dynamic sizing based on base_threshold (scales: SMALL=1x, MEDIUM=10x, LARGE=100x)
+        self.classifier = TWAPClassifier(base_threshold=base_threshold)
         self.running = False
         self.last_analysis = datetime.now()
 
@@ -557,23 +570,25 @@ class AlertFormatter:
 
     @staticmethod
     def format_confirmed_twap(ticker: str, tracked: TrackedTWAP, pending: PendingTWAP, classified) -> str:
-        """Format a confirmed TWAP alert (was pending, now confirmed)."""
+        """Format a confirmed TWAP alert (passed confirmation checks)."""
         d = classified.detection
         market_tag = AlertFormatter._get_market_tag(ticker)
         duration = (pending.last_seen - pending.first_seen).total_seconds()
         duration_str = f"{duration:.0f}s" if duration < 60 else f"{duration/60:.1f}min"
 
         return (
-            f"✅ <b>CONFIRMED TWAP: {tracked.name}</b>{market_tag}\n"
+            f"🎯 <b>TWAP CONFIRMED: {tracked.name}</b>{market_tag}\n"
             f"\n"
             f"<b>Ticker:</b> {ticker}\n"
             f"<b>Side:</b> {d.side.upper()}\n"
-            f"<b>Tracked for:</b> {duration_str} ({pending.checks} checks)\n"
-            f"<b>Confidence:</b> {pending.best_confidence} (SNR: {pending.best_snr:.1f})\n"
+            f"<b>Category:</b> {classified.size_category.value} ({classified.urgency_category.value})\n"
+            f"<b>Verified:</b> {pending.checks}x over {duration_str}\n"
             f"<b>Interval:</b> {d.interval_seconds:.1f}s\n"
+            f"<b>Per-exec:</b> ~${d.estimated_per_execution_value:,.0f}\n"
             f"<b>Est. Total:</b> ~${d.estimated_total_value:,.0f}\n"
+            f"<b>Confidence:</b> {pending.best_confidence} (SNR: {pending.best_snr:.1f})\n"
             f"\n"
-            f"<i>Low confidence signal confirmed through persistence</i>"
+            f"<i>{classified.description}</i>"
         )
 
     @staticmethod
@@ -734,11 +749,14 @@ class TWAPAlertService:
 
     async def _add_monitor(self, symbol: str) -> None:
         """Add a ticker monitor and optionally a spread monitor."""
+        # Use min_value_other as base threshold for dynamic sizing
+        # This scales size categories: SMALL=1x, MEDIUM=10x, LARGE=100x, WHALE>100x
         monitor = TickerMonitor(
             symbol=symbol,
             buffer_minutes=self.config.buffer_minutes,
             analysis_interval_sec=self.config.analysis_interval_sec,
             min_buffer_sec=self.config.min_buffer_sec,
+            base_threshold=self.config.min_value_other,
         )
         self.monitors[symbol] = monitor
         asyncio.create_task(monitor.start())
@@ -748,6 +766,7 @@ class TWAPAlertService:
             spread_monitor = SpreadMonitor(
                 symbol=symbol,
                 z_threshold=self.config.spread_z_threshold,
+                warmup_seconds=self.config.spread_warmup_sec,
                 cooldown_sec=self.config.spread_cooldown_sec,
                 on_anomaly=lambda a: asyncio.create_task(self._handle_spread_anomaly(a)),
             )
@@ -797,43 +816,35 @@ class TWAPAlertService:
                         if not self._value_meets_threshold(symbol, classified.detection.estimated_total_value):
                             continue
 
-                        # Check if confidence meets threshold
-                        if self._confidence_meets_threshold(confidence):
-                            # Meets threshold - track normally
-                            tracked, is_new = self.tracker.get_or_create(
-                                symbol,
-                                detection.side,
-                                detection.frequency_hz,
-                            )
+                        # ALL detections go through confirmation system
+                        pending, is_newly_confirmed, already_confirmed = self.tracker.track_detection(
+                            symbol,
+                            detection.side,
+                            detection.frequency_hz,
+                            snr,
+                            confidence,
+                            classified,
+                        )
 
-                            if is_new:
-                                msg = self.formatter.format_new_twap(symbol, tracked, classified)
-                                await self.bot.send_channel_message(msg)
-                            elif self.config.alert_on_updates:
+                        if is_newly_confirmed:
+                            # Just confirmed - check if confidence meets threshold to alert
+                            if self._confidence_meets_threshold(pending.best_confidence):
+                                tracked = self.tracker.get_confirmed_twap(
+                                    symbol, detection.side, detection.frequency_hz
+                                )
+                                if tracked:
+                                    msg = self.formatter.format_confirmed_twap(
+                                        symbol, tracked, pending, classified
+                                    )
+                                    await self.bot.send_channel_message(msg)
+
+                        elif already_confirmed and self.config.alert_on_updates:
+                            # Already confirmed - send update if configured
+                            tracked = self.tracker.get_confirmed_twap(
+                                symbol, detection.side, detection.frequency_hz
+                            )
+                            if tracked and self._confidence_meets_threshold(pending.best_confidence):
                                 msg = self.formatter.format_twap_update(symbol, tracked, classified)
-                                await self.bot.send_channel_message(msg)
-
-                        elif self.config.track_low_confidence:
-                            # Low confidence - track for confirmation
-                            pending, is_confirmed, should_alert = self.tracker.track_pending(
-                                symbol,
-                                detection.side,
-                                detection.frequency_hz,
-                                snr,
-                                confidence,
-                                classified,
-                            )
-
-                            if is_confirmed or should_alert:
-                                # Promote to tracked TWAP
-                                tracked, _ = self.tracker.get_or_create(
-                                    symbol,
-                                    detection.side,
-                                    detection.frequency_hz,
-                                )
-                                msg = self.formatter.format_confirmed_twap(
-                                    symbol, tracked, pending, classified
-                                )
                                 await self.bot.send_channel_message(msg)
 
                 except Exception as e:
@@ -885,9 +896,10 @@ class TWAPAlertService:
                 "/remove SYMBOL - Remove ticker\n"
                 "\n<b>Thresholds:</b>\n"
                 "/config - Show current config\n"
-                "/setmajor VALUE - Set BTC/ETH/SOL min USD (e.g., /setmajor 80000)\n"
-                "/setother VALUE - Set other tickers min USD (e.g., /setother 40000)\n"
+                "/setmajor VALUE - Set BTC/ETH/SOL min USD\n"
+                "/setother VALUE - Set other tickers min USD\n"
                 "/setconf LEVEL - Set min confidence (LOW/MEDIUM/HIGH)\n"
+                "/setchecks N - Set confirmation checks (e.g., /setchecks 5)\n"
                 f"\n<b>Major tickers:</b> {', '.join(MAJOR_TICKERS)}"
             )
             await self.bot.send_admin_message(help_text)
@@ -941,9 +953,11 @@ class TWAPAlertService:
                 f"<b>Configuration:</b>\n"
                 f"Analysis interval: {self.config.analysis_interval_sec}s\n"
                 f"Buffer size: {self.config.buffer_minutes}min\n"
+                f"Confirmation checks: {self.config.confirmation_checks}\n"
                 f"Min confidence: {self.config.min_confidence}\n"
                 f"Major threshold (BTC/ETH/SOL): ${self.config.min_value_major:,}\n"
                 f"Other threshold: ${self.config.min_value_other:,}\n"
+                f"Spread warmup: {self.config.spread_warmup_sec:.0f}s\n"
                 f"Alert on updates: {self.config.alert_on_updates}"
             )
             await self.bot.send_admin_message(msg)
@@ -978,6 +992,18 @@ class TWAPAlertService:
                 await self.bot.send_admin_message(f"✅ Min confidence set to {level}")
             else:
                 await self.bot.send_admin_message("❌ Invalid level. Use: LOW, MEDIUM, or HIGH")
+
+        elif cmd == "/setchecks" and len(parts) >= 2:
+            try:
+                value = int(parts[1])
+                if value < 1:
+                    raise ValueError("Must be at least 1")
+                self.config.confirmation_checks = value
+                self.tracker.set_confirmation_checks(value)
+                self.config.save()
+                await self.bot.send_admin_message(f"✅ Confirmation checks set to {value}")
+            except ValueError:
+                await self.bot.send_admin_message("❌ Invalid value. Use a positive number (e.g., /setchecks 5)")
 
 
 # =============================================================================

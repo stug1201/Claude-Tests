@@ -147,6 +147,9 @@ class SpreadMonitor:
 
     Uses exponential moving statistics for O(1) memory per ticker.
     Detects both abnormally wide and narrow spreads.
+
+    Has a warmup period where it collects data to establish a baseline
+    before triggering any anomaly alerts (similar to TWAP buffer approach).
     """
 
     def __init__(
@@ -154,7 +157,7 @@ class SpreadMonitor:
         symbol: str,
         z_threshold: float = 3.0,
         alpha: float = 0.01,
-        warmup_samples: int = 100,
+        warmup_seconds: float = 300.0,  # 5 minutes warmup by default
         cooldown_sec: float = 60.0,
         on_anomaly: Optional[Callable[[SpreadAnomaly], None]] = None,
     ):
@@ -163,7 +166,7 @@ class SpreadMonitor:
             symbol: Trading pair (e.g., "BTCUSDT" or "BTCUSDT.S")
             z_threshold: Z-score threshold for anomaly detection
             alpha: EMA smoothing factor (lower = slower adaptation)
-            warmup_samples: Samples needed before detection is active
+            warmup_seconds: Seconds to collect data before detection is active (default 5 min)
             cooldown_sec: Minimum seconds between alerts for same symbol
             on_anomaly: Callback for detected anomalies
         """
@@ -172,11 +175,12 @@ class SpreadMonitor:
         self.symbol = format_symbol(self.base_symbol, self.is_spot)
 
         self.z_threshold = z_threshold
+        self.warmup_seconds = warmup_seconds
         self.cooldown_sec = cooldown_sec
         self.on_anomaly = on_anomaly
 
-        # Statistics tracker
-        self.stats = ExponentialStats(alpha=alpha, warmup_samples=warmup_samples)
+        # Statistics tracker (warmup based on time, not samples)
+        self.stats = ExponentialStats(alpha=alpha, warmup_samples=1)  # No sample-based warmup
 
         # Connection state
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
@@ -189,6 +193,10 @@ class SpreadMonitor:
         self.last_spread_bps = 0.0
         self.last_bid = 0.0
         self.last_ask = 0.0
+
+        # Time-based warmup
+        self._start_time: Optional[float] = None
+        self._is_warmed_up = False
 
     @property
     def market_type(self) -> str:
@@ -233,8 +241,33 @@ class SpreadMonitor:
             ping_timeout=10,
         )
 
+    @property
+    def is_warmed_up(self) -> bool:
+        """Check if warmup period has elapsed."""
+        if self._is_warmed_up:
+            return True
+        if self._start_time is None:
+            return False
+        elapsed = time.time() - self._start_time
+        if elapsed >= self.warmup_seconds:
+            self._is_warmed_up = True
+            return True
+        return False
+
+    @property
+    def warmup_remaining_sec(self) -> float:
+        """Seconds remaining in warmup period."""
+        if self._is_warmed_up or self._start_time is None:
+            return 0.0
+        elapsed = time.time() - self._start_time
+        return max(0.0, self.warmup_seconds - elapsed)
+
     async def _listen(self) -> None:
         """Listen for book ticker updates."""
+        # Start warmup timer on first listen
+        if self._start_time is None:
+            self._start_time = time.time()
+
         async for message in self._ws:
             if not self._running:
                 break
@@ -251,11 +284,11 @@ class SpreadMonitor:
             self.last_bid = bid
             self.last_ask = ask
 
-            # Update statistics
+            # Update statistics (always update, even during warmup)
             self.stats.update(spread_bps)
 
-            # Check for anomaly (only after warmup)
-            if self.stats.is_valid:
+            # Check for anomaly only after time-based warmup complete
+            if self.is_warmed_up:
                 z = self.stats.z_score(spread_bps)
 
                 if abs(z) >= self.z_threshold:
@@ -288,6 +321,7 @@ class SpreadMonitor:
 
         self._running = True
         print(f"Connecting to Binance {self.market_type} book ticker for {self.symbol}...")
+        print(f"  Spread warmup period: {self.warmup_seconds:.0f}s (collecting baseline data)")
 
         while self._running:
             try:
@@ -319,7 +353,8 @@ class SpreadMonitor:
             "current_spread_bps": self.last_spread_bps,
             "mean_spread_bps": self.stats.mean,
             "std_spread_bps": self.stats.std,
-            "is_warmed_up": self.stats.is_valid,
+            "is_warmed_up": self.is_warmed_up,
+            "warmup_remaining_sec": self.warmup_remaining_sec,
             "samples": self.stats.count,
         }
 
@@ -334,7 +369,7 @@ class MultiSpreadMonitor:
         symbols: List[str],
         z_threshold: float = 3.0,
         alpha: float = 0.01,
-        warmup_samples: int = 100,
+        warmup_seconds: float = 300.0,
         cooldown_sec: float = 60.0,
         on_anomaly: Optional[Callable[[SpreadAnomaly], None]] = None,
     ):
@@ -347,7 +382,7 @@ class MultiSpreadMonitor:
                 symbol=symbol,
                 z_threshold=z_threshold,
                 alpha=alpha,
-                warmup_samples=warmup_samples,
+                warmup_seconds=warmup_seconds,
                 cooldown_sec=cooldown_sec,
                 on_anomaly=on_anomaly,
             )

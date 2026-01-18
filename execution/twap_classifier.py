@@ -84,14 +84,19 @@ class ClassifiedTWAP:
 class TWAPClassifier:
     """
     Classifies TWAP detections into categories.
+
+    Size categories scale dynamically based on base_threshold:
+    - SMALL: < 1x base_threshold
+    - MEDIUM: < 10x base_threshold
+    - LARGE: < 100x base_threshold
+    - WHALE: >= 100x base_threshold
     """
 
-    # Size thresholds (USD)
-    SIZE_THRESHOLDS = {
+    # Default size thresholds (USD) - used if no base_threshold provided
+    DEFAULT_SIZE_THRESHOLDS = {
         SizeCategory.SMALL: 50_000,
         SizeCategory.MEDIUM: 500_000,
         SizeCategory.LARGE: 5_000_000,
-        # Anything above LARGE threshold is WHALE
     }
 
     # Urgency thresholds (seconds)
@@ -101,20 +106,42 @@ class TWAPClassifier:
         # Anything above NORMAL threshold is PASSIVE
     }
 
+    # Scaling factors for dynamic sizing
+    SIZE_SCALE_FACTORS = {
+        SizeCategory.SMALL: 1,      # 1x base = small threshold
+        SizeCategory.MEDIUM: 10,    # 10x base = medium threshold
+        SizeCategory.LARGE: 100,    # 100x base = large threshold
+    }
+
     def __init__(
         self,
+        base_threshold: Optional[int] = None,
         size_thresholds: Optional[dict] = None,
         urgency_thresholds: Optional[dict] = None,
     ):
         """
-        Initialize classifier with optional custom thresholds.
+        Initialize classifier with dynamic or custom thresholds.
 
         Args:
-            size_thresholds: Custom USD thresholds for size categories
+            base_threshold: Base USD threshold for dynamic scaling. If provided,
+                           size categories scale as: SMALL=1x, MEDIUM=10x, LARGE=100x
+            size_thresholds: Override with explicit USD thresholds (ignores base_threshold)
             urgency_thresholds: Custom interval thresholds for urgency
         """
-        self.size_thresholds = size_thresholds or self.SIZE_THRESHOLDS
+        if size_thresholds:
+            self.size_thresholds = size_thresholds
+        elif base_threshold:
+            # Dynamic scaling based on base threshold
+            self.size_thresholds = {
+                SizeCategory.SMALL: base_threshold * self.SIZE_SCALE_FACTORS[SizeCategory.SMALL],
+                SizeCategory.MEDIUM: base_threshold * self.SIZE_SCALE_FACTORS[SizeCategory.MEDIUM],
+                SizeCategory.LARGE: base_threshold * self.SIZE_SCALE_FACTORS[SizeCategory.LARGE],
+            }
+        else:
+            self.size_thresholds = self.DEFAULT_SIZE_THRESHOLDS
+
         self.urgency_thresholds = urgency_thresholds or self.URGENCY_THRESHOLDS
+        self.base_threshold = base_threshold
 
     def _classify_size(self, value_usd: float) -> SizeCategory:
         """Classify by total USD value."""

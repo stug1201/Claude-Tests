@@ -19,6 +19,6 @@
   "spread_monitoring": true,
   "spread_z_threshold": 6.0,
   "spread_cooldown_sec": 300.0,
-  "track_low_confidence": true,
+  "spread_warmup_sec": 300.0,
   "confirmation_checks": 3
 }
