@@ -17,8 +17,8 @@
   "min_value_other": 40000,
   "alert_on_updates": false,
   "spread_monitoring": true,
-  "spread_z_threshold": 4.0,
-  "spread_cooldown_sec": 120.0,
+  "spread_z_threshold": 6.0,
+  "spread_cooldown_sec": 300.0,
   "track_low_confidence": true,
   "confirmation_checks": 3
 }

@@ -83,8 +83,8 @@ class Config:
     alert_on_updates: bool = False
     # Spread monitoring settings
     spread_monitoring: bool = True
-    spread_z_threshold: float = 4.0  # Z-score threshold for spread anomalies
-    spread_cooldown_sec: float = 120.0  # Minimum seconds between spread alerts
+    spread_z_threshold: float = 6.0  # Z-score threshold for spread anomalies (higher = less sensitive)
+    spread_cooldown_sec: float = 300.0  # Minimum seconds between spread alerts (5 min)
     # Low confidence confirmation tracking
     track_low_confidence: bool = True
     confirmation_checks: int = 3  # Number of confirmations needed
@@ -125,8 +125,8 @@ class Config:
             min_value_other=data.get("min_value_other", 40000),
             alert_on_updates=data.get("alert_on_updates", False),
             spread_monitoring=data.get("spread_monitoring", True),
-            spread_z_threshold=data.get("spread_z_threshold", 4.0),
-            spread_cooldown_sec=data.get("spread_cooldown_sec", 120.0),
+            spread_z_threshold=data.get("spread_z_threshold", 6.0),
+            spread_cooldown_sec=data.get("spread_cooldown_sec", 300.0),
             track_low_confidence=data.get("track_low_confidence", True),
             confirmation_checks=data.get("confirmation_checks", 3),
         )

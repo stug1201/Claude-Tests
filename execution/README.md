@@ -409,8 +409,8 @@ Send these commands to your bot via **direct message** (not in the channel):
 | `min_value_other` | integer | Min USD for other tickers (default: 40000) |
 | `alert_on_updates` | boolean | Alert when existing TWAP is re-detected |
 | `spread_monitoring` | boolean | Enable spread anomaly detection (default: true) |
-| `spread_z_threshold` | float | Z-score threshold for spread alerts (default: 4.0) |
-| `spread_cooldown_sec` | float | Min seconds between spread alerts (default: 120) |
+| `spread_z_threshold` | float | Z-score threshold for spread alerts (default: 6.0, higher = less sensitive) |
+| `spread_cooldown_sec` | float | Min seconds between spread alerts (default: 300) |
 | `track_low_confidence` | boolean | Track low-confidence TWAPs for confirmation (default: true) |
 | `confirmation_checks` | integer | Number of checks to confirm low-conf TWAP (default: 3) |
 
