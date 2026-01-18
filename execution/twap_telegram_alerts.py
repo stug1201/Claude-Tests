@@ -8,7 +8,7 @@ Features:
 - Monitors multiple tickers simultaneously
 - Sends alerts to a Telegram channel
 - Admin commands via DM (authorized user only)
-- Persistent configuration
+- Per-ticker USD thresholds for filtering
 - Per-ticker TWAP naming (e.g., BTC-B1, ETH-S2)
 
 Setup:
@@ -38,6 +38,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from twap_data_collector import TradeCollector, Trade, get_available_pairs
 from twap_fourier_analyzer import TWAPAnalyzer
 from twap_classifier import TWAPClassifier, SizeCategory
+
+# Major tickers with higher thresholds
+MAJOR_TICKERS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
 
 # =============================================================================
@@ -72,7 +75,8 @@ class Config:
     min_buffer_sec: int = 120
     buffer_minutes: int = 30
     min_confidence: str = "LOW"
-    min_size: str = "MEDIUM"  # Filter out SMALL TWAPs by default
+    min_value_major: int = 80000  # USD threshold for BTC/ETH/SOL
+    min_value_other: int = 40000  # USD threshold for other tickers
     alert_on_updates: bool = False
 
     def to_dict(self) -> dict:
@@ -85,7 +89,8 @@ class Config:
             "min_buffer_sec": self.min_buffer_sec,
             "buffer_minutes": self.buffer_minutes,
             "min_confidence": self.min_confidence,
-            "min_size": self.min_size,
+            "min_value_major": self.min_value_major,
+            "min_value_other": self.min_value_other,
             "alert_on_updates": self.alert_on_updates,
         }
 
@@ -101,7 +106,8 @@ class Config:
             min_buffer_sec=data.get("min_buffer_sec", 120),
             buffer_minutes=data.get("buffer_minutes", 30),
             min_confidence=data.get("min_confidence", "LOW"),
-            min_size=data.get("min_size", "MEDIUM"),
+            min_value_major=data.get("min_value_major", 80000),
+            min_value_other=data.get("min_value_other", 40000),
             alert_on_updates=data.get("alert_on_updates", False),
         )
 
@@ -113,6 +119,12 @@ class Config:
     def load(cls, path: str = "config.json") -> "Config":
         with open(path, "r") as f:
             return cls.from_dict(json.load(f))
+
+    def get_min_value_for_ticker(self, symbol: str) -> int:
+        """Get the minimum USD value threshold for a specific ticker."""
+        if symbol.upper() in MAJOR_TICKERS:
+            return self.min_value_major
+        return self.min_value_other
 
 
 # =============================================================================
@@ -133,16 +145,32 @@ class TelegramBot:
 
     async def start(self) -> None:
         self.session = aiohttp.ClientSession()
+        # Clear any pending updates to avoid processing old commands
+        await self._clear_pending_updates()
 
     async def stop(self) -> None:
         if self.session:
             await self.session.close()
 
+    async def _clear_pending_updates(self) -> None:
+        """Clear pending updates to avoid processing old commands on restart."""
+        try:
+            result = await self._call("getUpdates", offset=-1, timeout=1)
+            updates = result.get("result", [])
+            if updates:
+                self.last_update_id = updates[-1]["update_id"]
+        except Exception:
+            pass
+
     async def _call(self, method: str, **params) -> dict:
         """Call Telegram API method."""
         url = self.BASE_URL.format(token=self.token, method=method)
-        async with self.session.post(url, json=params) as resp:
-            return await resp.json()
+        try:
+            async with self.session.post(url, json=params, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                return await resp.json()
+        except Exception as e:
+            print(f"Telegram API error: {e}")
+            return {"ok": False, "error": str(e)}
 
     async def send_channel_message(self, text: str, parse_mode: str = "HTML") -> bool:
         """Send message to the alerts channel."""
@@ -459,9 +487,6 @@ class AlertFormatter:
 class TWAPAlertService:
     """Main service that coordinates everything."""
 
-    # Size level ordering for threshold checking
-    SIZE_LEVELS = {"SMALL": 0, "MEDIUM": 1, "LARGE": 2, "WHALE": 3}
-
     def __init__(self, config: Config):
         self.config = config
         self.bot = TelegramBot(
@@ -480,11 +505,10 @@ class TWAPAlertService:
         levels = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
         return levels.get(confidence.upper(), 0) >= levels.get(self.config.min_confidence.upper(), 0)
 
-    def _size_meets_threshold(self, size_category: SizeCategory) -> bool:
-        """Check if size meets minimum threshold."""
-        size_value = self.SIZE_LEVELS.get(size_category.value.upper(), 0)
-        threshold = self.SIZE_LEVELS.get(self.config.min_size.upper(), 1)
-        return size_value >= threshold
+    def _value_meets_threshold(self, symbol: str, value_usd: float) -> bool:
+        """Check if value meets minimum threshold for this ticker."""
+        min_value = self.config.get_min_value_for_ticker(symbol)
+        return value_usd >= min_value
 
     async def start(self) -> None:
         """Start the service."""
@@ -496,10 +520,12 @@ class TWAPAlertService:
                 await self._add_monitor(ticker_config.symbol)
 
         tickers_list = ", ".join([t.symbol for t in self.config.tickers if t.enabled])
+        # Only send startup message to admin DM, not channel
         await self.bot.send_admin_message(
             f"🟢 <b>TWAP Alert Service started!</b>\n\n"
             f"Monitoring: {tickers_list}\n"
-            f"Min size: {self.config.min_size}\n"
+            f"Major threshold (BTC/ETH/SOL): ${self.config.min_value_major:,}\n"
+            f"Other threshold: ${self.config.min_value_other:,}\n"
             f"Min confidence: {self.config.min_confidence}\n\n"
             f"Send /help for commands"
         )
@@ -514,7 +540,6 @@ class TWAPAlertService:
         self.running = False
         for monitor in self.monitors.values():
             await monitor.stop()
-        await self.bot.send_admin_message("🔴 TWAP Alert Service stopped.")
         await self.bot.stop()
 
     async def _add_monitor(self, symbol: str) -> None:
@@ -549,29 +574,32 @@ class TWAPAlertService:
                 if not monitor.should_analyze():
                     continue
 
-                results = monitor.analyze()
+                try:
+                    results = monitor.analyze()
 
-                for detection, classified in results:
-                    # Skip if doesn't meet confidence threshold
-                    if not self._confidence_meets_threshold(classified.confidence_level.value):
-                        continue
+                    for detection, classified in results:
+                        # Skip if doesn't meet confidence threshold
+                        if not self._confidence_meets_threshold(classified.confidence_level.value):
+                            continue
 
-                    # Skip if doesn't meet size threshold (filters out small TWAPs)
-                    if not self._size_meets_threshold(classified.size_category):
-                        continue
+                        # Skip if doesn't meet USD value threshold for this ticker
+                        if not self._value_meets_threshold(symbol, classified.detection.estimated_total_value):
+                            continue
 
-                    tracked, is_new = self.tracker.get_or_create(
-                        symbol,
-                        detection.side,
-                        detection.frequency_hz,
-                    )
+                        tracked, is_new = self.tracker.get_or_create(
+                            symbol,
+                            detection.side,
+                            detection.frequency_hz,
+                        )
 
-                    if is_new:
-                        msg = self.formatter.format_new_twap(symbol, tracked, classified)
-                        await self.bot.send_channel_message(msg)
-                    elif self.config.alert_on_updates:
-                        msg = self.formatter.format_twap_update(symbol, tracked, classified)
-                        await self.bot.send_channel_message(msg)
+                        if is_new:
+                            msg = self.formatter.format_new_twap(symbol, tracked, classified)
+                            await self.bot.send_channel_message(msg)
+                        elif self.config.alert_on_updates:
+                            msg = self.formatter.format_twap_update(symbol, tracked, classified)
+                            await self.bot.send_channel_message(msg)
+                except Exception as e:
+                    print(f"Analysis error for {symbol}: {e}")
 
     async def _command_loop(self) -> None:
         """Listen for admin commands."""
@@ -584,11 +612,16 @@ class TWAPAlertService:
                     user_id = message.get("from", {}).get("id")
                     text = message.get("text", "")
 
+                    if not user_id or not text:
+                        continue
+
                     if not self.bot.is_admin(user_id):
                         continue
 
                     await self._handle_command(text)
 
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 print(f"Command loop error: {e}")
                 await asyncio.sleep(5)
@@ -602,23 +635,22 @@ class TWAPAlertService:
         cmd = parts[0].lower()
 
         if cmd == "/help":
-            available = ", ".join(get_available_pairs()[:10]) + "..."
             help_text = (
                 "📖 <b>Admin Commands</b>\n\n"
                 "<b>Monitoring:</b>\n"
                 "/status - Show monitoring status\n"
                 "/pause - Pause monitoring\n"
                 "/resume - Resume monitoring\n"
-                "/shutdown - Stop service (requires systemctl to restart)\n"
                 "\n<b>Tickers:</b>\n"
                 "/list - List monitored tickers\n"
-                "/add SYMBOL - Add ticker (e.g., /add SOLUSDT)\n"
+                "/add SYMBOL - Add ticker\n"
                 "/remove SYMBOL - Remove ticker\n"
-                "\n<b>Config:</b>\n"
+                "\n<b>Thresholds:</b>\n"
                 "/config - Show current config\n"
-                "/setsize LEVEL - Set min size (SMALL/MEDIUM/LARGE/WHALE)\n"
+                "/setmajor VALUE - Set BTC/ETH/SOL min USD (e.g., /setmajor 80000)\n"
+                "/setother VALUE - Set other tickers min USD (e.g., /setother 40000)\n"
                 "/setconf LEVEL - Set min confidence (LOW/MEDIUM/HIGH)\n"
-                f"\n<b>Available pairs:</b> {available}"
+                f"\n<b>Major tickers:</b> {', '.join(MAJOR_TICKERS)}"
             )
             await self.bot.send_admin_message(help_text)
 
@@ -633,8 +665,9 @@ class TWAPAlertService:
                 lines = ["<b>Monitored Tickers:</b>"]
                 for symbol in self.monitors:
                     twaps = self.tracker.get_ticker_active(symbol)
+                    min_val = self.config.get_min_value_for_ticker(symbol)
                     twap_str = f" ({len(twaps)} active)" if twaps else ""
-                    lines.append(f"• {symbol}{twap_str}")
+                    lines.append(f"• {symbol} [>${min_val/1000:.0f}k]{twap_str}")
                 await self.bot.send_admin_message("\n".join(lines))
 
         elif cmd == "/add" and len(parts) >= 2:
@@ -645,7 +678,8 @@ class TWAPAlertService:
                 await self._add_monitor(symbol)
                 self.config.tickers.append(TickerConfig(symbol=symbol))
                 self.config.save()
-                await self.bot.send_admin_message(f"✅ Added {symbol}")
+                min_val = self.config.get_min_value_for_ticker(symbol)
+                await self.bot.send_admin_message(f"✅ Added {symbol} (min: ${min_val:,})")
 
         elif cmd == "/remove" and len(parts) >= 2:
             symbol = parts[1].upper()
@@ -659,18 +693,10 @@ class TWAPAlertService:
         elif cmd == "/pause":
             self.paused = True
             await self.bot.send_admin_message("⏸️ Monitoring paused. Send /resume to continue.")
-            await self.bot.send_channel_message("⏸️ <i>Monitoring paused by admin</i>")
 
         elif cmd == "/resume":
             self.paused = False
             await self.bot.send_admin_message("▶️ Monitoring resumed")
-            await self.bot.send_channel_message("▶️ <i>Monitoring resumed</i>")
-
-        elif cmd == "/shutdown":
-            await self.bot.send_admin_message("🔴 Shutting down... Use systemctl to restart.")
-            await self.bot.send_channel_message("🔴 <i>Service stopped by admin</i>")
-            await self.stop()
-            sys.exit(0)
 
         elif cmd == "/config":
             msg = (
@@ -678,19 +704,33 @@ class TWAPAlertService:
                 f"Analysis interval: {self.config.analysis_interval_sec}s\n"
                 f"Buffer size: {self.config.buffer_minutes}min\n"
                 f"Min confidence: {self.config.min_confidence}\n"
-                f"Min size: {self.config.min_size}\n"
+                f"Major threshold (BTC/ETH/SOL): ${self.config.min_value_major:,}\n"
+                f"Other threshold: ${self.config.min_value_other:,}\n"
                 f"Alert on updates: {self.config.alert_on_updates}"
             )
             await self.bot.send_admin_message(msg)
 
-        elif cmd == "/setsize" and len(parts) >= 2:
-            level = parts[1].upper()
-            if level in self.SIZE_LEVELS:
-                self.config.min_size = level
+        elif cmd == "/setmajor" and len(parts) >= 2:
+            try:
+                value = int(parts[1].replace(",", "").replace("$", ""))
+                if value < 0:
+                    raise ValueError("Negative value")
+                self.config.min_value_major = value
                 self.config.save()
-                await self.bot.send_admin_message(f"✅ Min size set to {level}")
-            else:
-                await self.bot.send_admin_message("❌ Invalid level. Use: SMALL, MEDIUM, LARGE, or WHALE")
+                await self.bot.send_admin_message(f"✅ Major threshold (BTC/ETH/SOL) set to ${value:,}")
+            except ValueError:
+                await self.bot.send_admin_message("❌ Invalid value. Use a number (e.g., /setmajor 80000)")
+
+        elif cmd == "/setother" and len(parts) >= 2:
+            try:
+                value = int(parts[1].replace(",", "").replace("$", ""))
+                if value < 0:
+                    raise ValueError("Negative value")
+                self.config.min_value_other = value
+                self.config.save()
+                await self.bot.send_admin_message(f"✅ Other threshold set to ${value:,}")
+            except ValueError:
+                await self.bot.send_admin_message("❌ Invalid value. Use a number (e.g., /setother 40000)")
 
         elif cmd == "/setconf" and len(parts) >= 2:
             level = parts[1].upper()
@@ -734,11 +774,19 @@ async def main():
         print("Please configure config.json with your Telegram credentials")
         return
 
+    print(f"Starting TWAP Alert Service...")
+    print(f"Major threshold (BTC/ETH/SOL): ${config.min_value_major:,}")
+    print(f"Other threshold: ${config.min_value_other:,}")
+
     service = TWAPAlertService(config)
 
     try:
         await service.start()
     except KeyboardInterrupt:
+        print("\nShutting down...")
+        await service.stop()
+    except Exception as e:
+        print(f"Service error: {e}")
         await service.stop()
 
 

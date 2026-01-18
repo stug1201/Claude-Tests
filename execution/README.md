@@ -352,35 +352,35 @@ Send these commands to your bot via **direct message** (not in the channel):
 | `/status` | Show monitoring status and active TWAPs |
 | `/pause` | Pause all monitoring |
 | `/resume` | Resume monitoring |
-| `/shutdown` | Stop service (requires systemctl to restart) |
 
 ### Ticker Management
 
 | Command | Description |
 |---------|-------------|
-| `/list` | List all monitored tickers with active TWAP count |
-| `/add SYMBOL` | Add ticker (e.g., `/add SOLUSDT`) |
+| `/list` | List all monitored tickers with thresholds |
+| `/add SYMBOL` | Add ticker (e.g., `/add LINKUSDT`) |
 | `/remove SYMBOL` | Remove ticker |
 
-### Configuration Commands
+### Threshold Commands
 
 | Command | Description |
 |---------|-------------|
 | `/config` | Show current configuration |
-| `/setsize LEVEL` | Set min size filter: SMALL, MEDIUM, LARGE, WHALE |
+| `/setmajor VALUE` | Set BTC/ETH/SOL min USD (e.g., `/setmajor 80000`) |
+| `/setother VALUE` | Set other tickers min USD (e.g., `/setother 40000`) |
 | `/setconf LEVEL` | Set min confidence: LOW, MEDIUM, HIGH |
 
 ### Examples
 
 ```
-/add SOLUSDT
+/add LINKUSDT
 /remove ADAUSDT
 /status
-/setsize MEDIUM
-/setconf LOW
+/setmajor 100000
+/setother 50000
 ```
 
-**Note**: Only messages from the configured `telegram_admin_id` are processed. All other users are ignored.
+**Note**: Only messages from the configured `telegram_admin_id` are processed. Service start/stop is only via systemctl.
 
 ---
 
@@ -398,8 +398,16 @@ Send these commands to your bot via **direct message** (not in the channel):
 | `min_buffer_sec` | integer | Minimum data before first analysis (default: 120) |
 | `buffer_minutes` | integer | Trade buffer size (default: 30) |
 | `min_confidence` | string | Minimum confidence to alert: LOW, MEDIUM, HIGH |
-| `min_size` | string | Minimum size to alert: SMALL, MEDIUM, LARGE, WHALE (default: MEDIUM) |
+| `min_value_major` | integer | Min USD for BTC/ETH/SOL (default: 80000) |
+| `min_value_other` | integer | Min USD for other tickers (default: 40000) |
 | `alert_on_updates` | boolean | Alert when existing TWAP is re-detected |
+
+### Threshold Logic
+
+| Ticker Type | Default Threshold | Change Command |
+|-------------|-------------------|----------------|
+| BTC, ETH, SOL | $80,000 | `/setmajor VALUE` |
+| All others | $40,000 | `/setother VALUE` |
 
 ### Ticker Configuration
 
