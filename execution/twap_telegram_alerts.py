@@ -582,15 +582,18 @@ class AlertFormatter:
         direction = "WIDENED" if anomaly.is_wide else "NARROWED"
         market_tag = " [SPOT]" if anomaly.symbol.endswith(".S") else ""
 
+        # Format multiplier for context (e.g., "3.2x normal")
+        multiplier_str = f"{anomaly.multiplier:.1f}x normal" if anomaly.multiplier >= 1.5 else f"{anomaly.multiplier:.2f}x"
+
         return (
             f"📊 <b>SPREAD {direction}: {anomaly.symbol}</b>{market_tag}\n"
             f"\n"
-            f"<b>Current:</b> {anomaly.spread_bps:.2f} bps\n"
+            f"<b>Current:</b> {anomaly.spread_bps:.2f} bps ({multiplier_str})\n"
             f"<b>Normal:</b> {anomaly.mean_bps:.2f} ± {anomaly.std_bps:.2f} bps\n"
             f"<b>Z-score:</b> {anomaly.z_score:.1f} ({anomaly.severity})\n"
             f"<b>Bid/Ask:</b> {anomaly.bid:.2f} / {anomaly.ask:.2f}\n"
             f"\n"
-            f"<i>Spread deviation may indicate liquidity change or large order</i>"
+            f"<i>Spread is {multiplier_str} - may indicate liquidity change or large order</i>"
         )
 
     @staticmethod

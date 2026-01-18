@@ -34,6 +34,7 @@ class SpreadAnomaly:
     mean_bps: float
     std_bps: float
     z_score: float
+    multiplier: float  # How many times normal spread (e.g., 3.5 = 3.5x normal)
     bid: float
     ask: float
     mid: float
@@ -45,17 +46,17 @@ class SpreadAnomaly:
     @property
     def is_wide(self) -> bool:
         """True if spread is abnormally wide."""
-        return self.z_score > 0
+        return self.multiplier > 1.0
 
     @property
     def severity(self) -> str:
-        """Severity based on z-score magnitude."""
-        z = abs(self.z_score)
-        if z >= 5:
+        """Severity based on multiplier (how many times normal)."""
+        m = self.multiplier
+        if m >= 10:
             return "EXTREME"
-        elif z >= 4:
+        elif m >= 5:
             return "SEVERE"
-        elif z >= 3:
+        elif m >= 3:
             return "HIGH"
         else:
             return "MODERATE"
@@ -66,17 +67,22 @@ class ExponentialStats:
     Maintains exponential moving average and variance with O(1) space.
 
     Uses Welford's online algorithm adapted for exponential weighting.
+    Includes minimum std floor to prevent low variance from causing huge z-scores.
     """
 
-    def __init__(self, alpha: float = 0.01, warmup_samples: int = 100):
+    def __init__(self, alpha: float = 0.01, warmup_samples: int = 100, min_std_pct: float = 0.5):
         """
         Args:
             alpha: Smoothing factor (0 < alpha < 1). Lower = slower adaptation.
                    Effective window ~ 2/alpha samples.
             warmup_samples: Minimum samples before stats are considered valid.
+            min_std_pct: Minimum std as percentage of mean (0.5 = 50%).
+                         This prevents low variance periods from causing huge z-scores.
+                         With 0.5, a 3x spread change = z-score of ~4.
         """
         self.alpha = alpha
         self.warmup_samples = warmup_samples
+        self.min_std_pct = min_std_pct
         self.mean = 0.0
         self.variance = 0.0
         self.count = 0
@@ -102,8 +108,19 @@ class ExponentialStats:
 
     @property
     def std(self) -> float:
-        """Standard deviation."""
+        """Raw standard deviation."""
         return math.sqrt(max(0, self.variance))
+
+    @property
+    def effective_std(self) -> float:
+        """Standard deviation with minimum floor based on mean.
+
+        This ensures z-scores are meaningful even during low variance periods.
+        With min_std_pct=0.5, we need at least a 50% change from mean to start
+        accumulating z-score, making it correlate better with actual magnitude changes.
+        """
+        min_std = abs(self.mean) * self.min_std_pct
+        return max(self.std, min_std)
 
     @property
     def is_valid(self) -> bool:
@@ -111,10 +128,17 @@ class ExponentialStats:
         return self.count >= self.warmup_samples
 
     def z_score(self, value: float) -> float:
-        """Calculate z-score for a value."""
-        if self.std < 1e-10:
+        """Calculate z-score using effective_std (with floor)."""
+        eff_std = self.effective_std
+        if eff_std < 1e-10:
             return 0.0
-        return (value - self.mean) / self.std
+        return (value - self.mean) / eff_std
+
+    def multiplier(self, value: float) -> float:
+        """Calculate how many times the mean this value is."""
+        if self.mean < 1e-10:
+            return 1.0
+        return value / self.mean
 
 
 class SpreadMonitor:
@@ -248,6 +272,7 @@ class SpreadMonitor:
                             mean_bps=self.stats.mean,
                             std_bps=self.stats.std,
                             z_score=z,
+                            multiplier=self.stats.multiplier(spread_bps),
                             bid=bid,
                             ask=ask,
                             mid=(bid + ask) / 2,
@@ -364,7 +389,8 @@ async def main():
     """Test the spread monitor."""
     def on_anomaly(anomaly: SpreadAnomaly):
         print(f"\n⚠️  SPREAD ANOMALY: {anomaly.symbol}")
-        print(f"    Spread: {anomaly.spread_bps:.2f} bps (mean: {anomaly.mean_bps:.2f}, std: {anomaly.std_bps:.2f})")
+        print(f"    Spread: {anomaly.spread_bps:.2f} bps ({anomaly.multiplier:.1f}x normal)")
+        print(f"    Mean: {anomaly.mean_bps:.2f} bps, Std: {anomaly.std_bps:.2f} bps")
         print(f"    Z-score: {anomaly.z_score:.2f} ({anomaly.severity})")
         print(f"    Bid: {anomaly.bid:.2f}, Ask: {anomaly.ask:.2f}")
 
