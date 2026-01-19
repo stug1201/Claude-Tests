@@ -83,7 +83,7 @@ class Config:
     alert_on_updates: bool = False
     # Spread monitoring settings
     spread_monitoring: bool = True
-    spread_z_threshold: float = 6.0  # Z-score threshold for spread anomalies (higher = less sensitive)
+    spread_z_threshold: float = 4.0  # Z-score threshold (with 100% std floor: z=4 means 5x spread, z=9 means 10x)
     spread_cooldown_sec: float = 300.0  # Minimum seconds between spread alerts (5 min)
     spread_warmup_sec: float = 300.0  # Spread warmup period in seconds (5 min default)
     # TWAP confirmation - ALL detections require confirmation_checks repeats before alerting
@@ -125,7 +125,7 @@ class Config:
             min_value_other=data.get("min_value_other", 40000),
             alert_on_updates=data.get("alert_on_updates", False),
             spread_monitoring=data.get("spread_monitoring", True),
-            spread_z_threshold=data.get("spread_z_threshold", 6.0),
+            spread_z_threshold=data.get("spread_z_threshold", 4.0),
             spread_cooldown_sec=data.get("spread_cooldown_sec", 300.0),
             spread_warmup_sec=data.get("spread_warmup_sec", 300.0),
             confirmation_checks=data.get("confirmation_checks", 3),

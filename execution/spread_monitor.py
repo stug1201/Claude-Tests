@@ -52,11 +52,11 @@ class SpreadAnomaly:
     def severity(self) -> str:
         """Severity based on multiplier (how many times normal)."""
         m = self.multiplier
-        if m >= 10:
+        if m >= 20:
             return "EXTREME"
-        elif m >= 5:
+        elif m >= 10:
             return "SEVERE"
-        elif m >= 3:
+        elif m >= 5:
             return "HIGH"
         else:
             return "MODERATE"
@@ -70,15 +70,17 @@ class ExponentialStats:
     Includes minimum std floor to prevent low variance from causing huge z-scores.
     """
 
-    def __init__(self, alpha: float = 0.01, warmup_samples: int = 100, min_std_pct: float = 0.5):
+    def __init__(self, alpha: float = 0.01, warmup_samples: int = 100, min_std_pct: float = 1.0):
         """
         Args:
             alpha: Smoothing factor (0 < alpha < 1). Lower = slower adaptation.
                    Effective window ~ 2/alpha samples.
             warmup_samples: Minimum samples before stats are considered valid.
-            min_std_pct: Minimum std as percentage of mean (0.5 = 50%).
+            min_std_pct: Minimum std as percentage of mean (1.0 = 100%).
                          This prevents low variance periods from causing huge z-scores.
-                         With 0.5, a 3x spread change = z-score of ~4.
+                         With 1.0, z-score directly correlates to multiplier:
+                         - 5x spread = z-score of 4
+                         - 10x spread = z-score of 9
         """
         self.alpha = alpha
         self.warmup_samples = warmup_samples
@@ -116,8 +118,11 @@ class ExponentialStats:
         """Standard deviation with minimum floor based on mean.
 
         This ensures z-scores are meaningful even during low variance periods.
-        With min_std_pct=0.5, we need at least a 50% change from mean to start
-        accumulating z-score, making it correlate better with actual magnitude changes.
+        With min_std_pct=1.0, the floor equals the mean, so:
+        - z-score = (value - mean) / mean = multiplier - 1
+        - 5x spread = z-score of 4
+        - 10x spread = z-score of 9
+        This makes z-score directly correlate with magnitude of change.
         """
         min_std = abs(self.mean) * self.min_std_pct
         return max(self.std, min_std)
