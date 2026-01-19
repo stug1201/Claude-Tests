@@ -1,0 +1,3 @@
+# This file keeps the .tmp directory in git while ignoring its contents
+# All intermediate files should be placed here
+# This directory can be safely deleted and regenerated

@@ -1,0 +1,24 @@
+{
+  "telegram_bot_token": "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz",
+  "telegram_channel_id": "-1001234567890",
+  "telegram_admin_id": 123456789,
+  "tickers": [
+    {"symbol": "BTCUSDT", "enabled": true},
+    {"symbol": "ETHUSDT", "enabled": true},
+    {"symbol": "SOLUSDT", "enabled": true},
+    {"symbol": "BTCUSDT.S", "enabled": false},
+    {"symbol": "ETHUSDT.S", "enabled": false}
+  ],
+  "analysis_interval_sec": 30,
+  "min_buffer_sec": 120,
+  "buffer_minutes": 30,
+  "min_confidence": "LOW",
+  "min_value_major": 80000,
+  "min_value_other": 40000,
+  "alert_on_updates": false,
+  "spread_monitoring": true,
+  "spread_z_threshold": 4.0,
+  "spread_cooldown_sec": 300.0,
+  "spread_warmup_sec": 300.0,
+  "confirmation_checks": 3
+}
