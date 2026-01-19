@@ -376,6 +376,7 @@ Send these commands to your bot via **direct message** (not in the channel):
 | `/setmajor VALUE` | Set BTC/ETH/SOL min USD (e.g., `/setmajor 80000`) |
 | `/setother VALUE` | Set other tickers min USD (e.g., `/setother 40000`) |
 | `/setconf LEVEL` | Set min confidence: LOW, MEDIUM, HIGH |
+| `/setchecks N` | Set confirmation checks required (e.g., `/setchecks 5`) |
 
 ### Examples
 
@@ -406,13 +407,13 @@ Send these commands to your bot via **direct message** (not in the channel):
 | `buffer_minutes` | integer | Trade buffer size (default: 30) |
 | `min_confidence` | string | Minimum confidence to alert: LOW, MEDIUM, HIGH |
 | `min_value_major` | integer | Min USD for BTC/ETH/SOL (default: 80000) |
-| `min_value_other` | integer | Min USD for other tickers (default: 40000) |
+| `min_value_other` | integer | Min USD for other tickers (default: 40000) - also sets size category scaling |
 | `alert_on_updates` | boolean | Alert when existing TWAP is re-detected |
 | `spread_monitoring` | boolean | Enable spread anomaly detection (default: true) |
-| `spread_z_threshold` | float | Z-score threshold for spread alerts (default: 6.0, higher = less sensitive) |
+| `spread_z_threshold` | float | Z-score threshold for spread alerts (default: 4.0 = 5x spread change) |
 | `spread_cooldown_sec` | float | Min seconds between spread alerts (default: 300) |
-| `track_low_confidence` | boolean | Track low-confidence TWAPs for confirmation (default: true) |
-| `confirmation_checks` | integer | Number of checks to confirm low-conf TWAP (default: 3) |
+| `spread_warmup_sec` | float | Warmup period to establish baseline before spread alerts (default: 300) |
+| `confirmation_checks` | integer | Number of repeat detections to confirm ANY TWAP (default: 3) |
 
 ### Threshold Logic
 
@@ -509,35 +510,45 @@ confirmation. Risk score 52/100 indicates moderate market influence.
 
 ### Confirmed TWAP Alert Example
 
-When `track_low_confidence` is enabled, low-confidence TWAPs are tracked and alerted when confirmed:
+ALL TWAP detections (LOW, MEDIUM, HIGH confidence) require `confirmation_checks` (default: 3) repeat detections before alerting:
 
 ```
-✅ CONFIRMED TWAP: ETH-B1 [SPOT]
+🎯 TWAP CONFIRMED: ETH-B1 [SPOT]
 
 Ticker:       ETHUSDT.S
 Side:         BUY
-Tracked for:  2.5min (3 checks)
-Confidence:   MEDIUM (SNR: 4.2)
+Category:     Medium (Normal)
+Verified:     3x over 1.5min
 Interval:     45.0s
+Per-exec:     ~$5,000
 Est. Total:   ~$125,000
+Confidence:   MEDIUM (SNR: 4.2)
 
-Low confidence signal confirmed through persistence
+An institutional trader is steadily buying...
 ```
+
+This confirmation system reduces false positives by requiring the same pattern to be detected multiple times.
 
 ### Spread Anomaly Alert Example
 
-When `spread_monitoring` is enabled, unusual spread changes are detected:
+When `spread_monitoring` is enabled, large spread changes (5x+ normal) are detected:
 
 ```
 📊 SPREAD WIDENED: BTCUSDT
 
-Current:     2.50 bps
+Current:     4.50 bps (5.6x normal)
 Normal:      0.80 ± 0.35 bps
-Z-score:     4.9 (SEVERE)
-Bid/Ask:     42150.50 / 42161.05
+Z-score:     4.6 (HIGH)
+Bid/Ask:     42150.50 / 42169.05
 
-Spread deviation may indicate liquidity change or large order
+Spread is 5.6x normal - may indicate liquidity change or large order
 ```
+
+**Spread Detection Tuning:**
+- 5-minute warmup period to establish baseline before any alerts
+- Only alerts for 5x+ spread changes (very conservative)
+- Severity levels: HIGH (5-10x), SEVERE (10-20x), EXTREME (20x+)
+- Small fluctuations (e.g., 1.4x, 2x) are ignored
 
 ### TWAP Naming Convention
 
@@ -566,14 +577,18 @@ Each ticker has independent numbering, so BTC and ETH counters don't interfere.
 | **Confidence** | Detection reliability based on SNR and observed cycles |
 | **Risk** | Market impact score (0-100) based on size, urgency, and confidence |
 
-### Size Categories
+### Size Categories (Dynamic)
 
-| Category | Estimated Total Value |
-|----------|----------------------|
-| Small | < $50,000 |
-| Medium | $50,000 - $500,000 |
-| Large | $500,000 - $5,000,000 |
-| Whale | > $5,000,000 |
+Size categories scale dynamically based on your `min_value_other` config setting:
+
+| Category | Formula | With $40K base (default) |
+|----------|---------|--------------------------|
+| Small | < 1x base | < $40,000 |
+| Medium | < 10x base | < $400,000 |
+| Large | < 100x base | < $4,000,000 |
+| Whale | ≥ 100x base | ≥ $4,000,000 |
+
+Changing `min_value_other` automatically scales all size categories.
 
 ### Urgency Categories
 
