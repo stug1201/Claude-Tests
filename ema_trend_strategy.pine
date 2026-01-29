@@ -36,39 +36,34 @@ volume_confirmed = volume > Volume_Test
 ema1_cross_over_ema2 = ta.crossover(EMA1, EMA2)
 ema1_cross_over_ema3 = ta.crossover(EMA1, EMA3)
 
-// Detect crossunders for EMA1 relative to EMA2 and EMA3
+// Detect crossunder for EMA1 relative to EMA2 (used for exit)
 ema1_cross_under_ema2 = ta.crossunder(EMA1, EMA2)
-ema1_cross_under_ema3 = ta.crossunder(EMA1, EMA3)
 
 // Uptrend Signal: EMA1 crosses over one EMA while already above the other
 // This triggers when EMA1 definitively moves above BOTH slower EMAs
 uptrend_cross = (ema1_cross_over_ema2 and EMA1 > EMA3) or (ema1_cross_over_ema3 and EMA1 > EMA2)
 
-// Downtrend Signal: EMA1 crosses under one EMA while already below the other
-// This triggers when EMA1 definitively moves below BOTH slower EMAs
-downtrend_cross = (ema1_cross_under_ema2 and EMA1 < EMA3) or (ema1_cross_under_ema3 and EMA1 < EMA2)
-
 // ============================================================================
-// FINAL SIGNALS WITH VOLUME CONFIRMATION
+// ENTRY AND EXIT SIGNALS WITH VOLUME CONFIRMATION
 // ============================================================================
 
-// Long entry: Uptrend cross confirmed by above-median volume
-long_signal = uptrend_cross and volume_confirmed
+// Long entry: Uptrend confirmed when EMA1 crosses above both EMA2 and EMA3 with significant volume
+long_entry = uptrend_cross and volume_confirmed
 
-// Short entry: Downtrend cross confirmed by above-median volume
-short_signal = downtrend_cross and volume_confirmed
+// Long exit: Close position when EMA1 crosses under EMA2 with significant volume
+long_exit = ema1_cross_under_ema2 and volume_confirmed
 
 // ============================================================================
 // STRATEGY EXECUTION
 // ============================================================================
 
 // Enter long position on confirmed uptrend
-if long_signal
+if long_entry
     strategy.entry("Long", strategy.long)
 
-// Enter short position on confirmed downtrend
-if short_signal
-    strategy.entry("Short", strategy.short)
+// Exit long position when EMA1 crosses under EMA2 with volume confirmation
+if long_exit
+    strategy.close("Long")
 
 // ============================================================================
 // VISUALIZATION
@@ -79,14 +74,13 @@ plot(EMA1, "EMA1 (21)", color=color.new(color.blue, 0), linewidth=2)
 plot(EMA2, "EMA2 (50)", color=color.new(color.orange, 0), linewidth=2)
 plot(EMA3, "EMA3 (99)", color=color.new(color.red, 0), linewidth=2)
 
-// Plot entry signals
-plotshape(long_signal, "Long Signal", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small)
-plotshape(short_signal, "Short Signal", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small)
+// Plot entry and exit signals
+plotshape(long_entry, "Long Entry", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(long_exit, "Long Exit", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small)
 
-// Background color to show current trend state
+// Background color to show when in uptrend (EMA1 above both)
 ema1_above_both = EMA1 > EMA2 and EMA1 > EMA3
-ema1_below_both = EMA1 < EMA2 and EMA1 < EMA3
-bgcolor(ema1_above_both ? color.new(color.green, 90) : ema1_below_both ? color.new(color.red, 90) : na)
+bgcolor(ema1_above_both ? color.new(color.green, 90) : na)
 
 // ============================================================================
 // INFORMATION TABLE
