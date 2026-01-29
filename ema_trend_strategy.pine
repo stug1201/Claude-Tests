@@ -65,8 +65,8 @@ if long_entry and strategy.position_size == 0
     long_entry_bar := bar_index
     long_entry_price := close
 
-// Reset tracking when position is closed
-if strategy.position_size == 0
+// Reset tracking when position is closed (but not on entry bar)
+if strategy.position_size == 0 and not long_entry
     long_entry_bar := na
     long_entry_price := na
 
