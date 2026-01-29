@@ -1,0 +1,111 @@
+// @version=5
+strategy("EMA Trend Following Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ============================================================================
+// INPUT PARAMETERS
+// ============================================================================
+
+// EMA Length Inputs
+EMA1_length = input.int(21, "EMA1 Length (Fast)", minval=1, group="EMA Settings")
+EMA2_length = input.int(50, "EMA2 Length (Medium)", minval=1, group="EMA Settings")
+EMA3_length = input.int(99, "EMA3 Length (Slow)", minval=1, group="EMA Settings")
+
+// Volume Confirmation Input
+volume_lookback = input.int(21, "Volume Lookback Period", minval=1, group="Volume Settings")
+
+// ============================================================================
+// CALCULATE INDICATORS
+// ============================================================================
+
+// Calculate the three EMAs
+EMA1 = ta.ema(close, EMA1_length)
+EMA2 = ta.ema(close, EMA2_length)
+EMA3 = ta.ema(close, EMA3_length)
+
+// Calculate median volume over the lookback period for Volume_Test
+Volume_Test = ta.median(volume, volume_lookback)
+
+// Volume confirmation: current volume must exceed median volume
+volume_confirmed = volume > Volume_Test
+
+// ============================================================================
+// TREND DETECTION LOGIC
+// ============================================================================
+
+// Detect crossovers for EMA1 relative to EMA2 and EMA3
+ema1_cross_over_ema2 = ta.crossover(EMA1, EMA2)
+ema1_cross_over_ema3 = ta.crossover(EMA1, EMA3)
+
+// Detect crossunders for EMA1 relative to EMA2 and EMA3
+ema1_cross_under_ema2 = ta.crossunder(EMA1, EMA2)
+ema1_cross_under_ema3 = ta.crossunder(EMA1, EMA3)
+
+// Uptrend Signal: EMA1 crosses over one EMA while already above the other
+// This triggers when EMA1 definitively moves above BOTH slower EMAs
+uptrend_cross = (ema1_cross_over_ema2 and EMA1 > EMA3) or (ema1_cross_over_ema3 and EMA1 > EMA2)
+
+// Downtrend Signal: EMA1 crosses under one EMA while already below the other
+// This triggers when EMA1 definitively moves below BOTH slower EMAs
+downtrend_cross = (ema1_cross_under_ema2 and EMA1 < EMA3) or (ema1_cross_under_ema3 and EMA1 < EMA2)
+
+// ============================================================================
+// FINAL SIGNALS WITH VOLUME CONFIRMATION
+// ============================================================================
+
+// Long entry: Uptrend cross confirmed by above-median volume
+long_signal = uptrend_cross and volume_confirmed
+
+// Short entry: Downtrend cross confirmed by above-median volume
+short_signal = downtrend_cross and volume_confirmed
+
+// ============================================================================
+// STRATEGY EXECUTION
+// ============================================================================
+
+// Enter long position on confirmed uptrend
+if long_signal
+    strategy.entry("Long", strategy.long)
+
+// Enter short position on confirmed downtrend
+if short_signal
+    strategy.entry("Short", strategy.short)
+
+// ============================================================================
+// VISUALIZATION
+// ============================================================================
+
+// Plot EMAs
+plot(EMA1, "EMA1 (21)", color=color.new(color.blue, 0), linewidth=2)
+plot(EMA2, "EMA2 (50)", color=color.new(color.orange, 0), linewidth=2)
+plot(EMA3, "EMA3 (99)", color=color.new(color.red, 0), linewidth=2)
+
+// Plot entry signals
+plotshape(long_signal, "Long Signal", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(short_signal, "Short Signal", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small)
+
+// Background color to show current trend state
+ema1_above_both = EMA1 > EMA2 and EMA1 > EMA3
+ema1_below_both = EMA1 < EMA2 and EMA1 < EMA3
+bgcolor(ema1_above_both ? color.new(color.green, 90) : ema1_below_both ? color.new(color.red, 90) : na)
+
+// ============================================================================
+// INFORMATION TABLE
+// ============================================================================
+
+var table info_table = table.new(position.top_right, 2, 5, bgcolor=color.new(color.gray, 80))
+
+if barstate.islast
+    table.cell(info_table, 0, 0, "Indicator", text_color=color.white, text_size=size.small)
+    table.cell(info_table, 1, 0, "Value", text_color=color.white, text_size=size.small)
+
+    table.cell(info_table, 0, 1, "EMA1 (Fast)", text_color=color.blue, text_size=size.small)
+    table.cell(info_table, 1, 1, str.tostring(EMA1, "#.##"), text_color=color.white, text_size=size.small)
+
+    table.cell(info_table, 0, 2, "EMA2 (Medium)", text_color=color.orange, text_size=size.small)
+    table.cell(info_table, 1, 2, str.tostring(EMA2, "#.##"), text_color=color.white, text_size=size.small)
+
+    table.cell(info_table, 0, 3, "EMA3 (Slow)", text_color=color.red, text_size=size.small)
+    table.cell(info_table, 1, 3, str.tostring(EMA3, "#.##"), text_color=color.white, text_size=size.small)
+
+    table.cell(info_table, 0, 4, "Median Vol", text_color=color.white, text_size=size.small)
+    table.cell(info_table, 1, 4, str.tostring(Volume_Test, "#.##"), text_color=volume_confirmed ? color.green : color.red, text_size=size.small)
