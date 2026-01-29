@@ -1,5 +1,5 @@
 // @version=6
-strategy("EMA Trend Following Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+strategy("EMA Trend Following Strategy (Long Only)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
 
 // ============================================================================
 // INPUT PARAMETERS
@@ -41,27 +41,16 @@ volume_confirmed = volume > Volume_Test
 ema1_cross_over_ema2 = ta.crossover(EMA1, EMA2)
 ema1_cross_over_ema3 = ta.crossover(EMA1, EMA3)
 
-// Detect crossunders for EMA1 relative to EMA2 and EMA3
-ema1_cross_under_ema2 = ta.crossunder(EMA1, EMA2)
-ema1_cross_under_ema3 = ta.crossunder(EMA1, EMA3)
-
 // Uptrend Signal: EMA1 crosses over one EMA while already above the other
 // This triggers when EMA1 definitively moves above BOTH slower EMAs
 uptrend_cross = (ema1_cross_over_ema2 and EMA1 > EMA3) or (ema1_cross_over_ema3 and EMA1 > EMA2)
 
-// Downtrend Signal: EMA1 crosses under one EMA while already below the other
-// This triggers when EMA1 definitively moves below BOTH slower EMAs
-downtrend_cross = (ema1_cross_under_ema2 and EMA1 < EMA3) or (ema1_cross_under_ema3 and EMA1 < EMA2)
-
 // ============================================================================
-// ENTRY SIGNALS WITH VOLUME CONFIRMATION
+// ENTRY SIGNAL WITH VOLUME CONFIRMATION
 // ============================================================================
 
 // Long entry: Uptrend confirmed with significant volume
 long_entry = uptrend_cross and volume_confirmed
-
-// Short entry: Downtrend confirmed with significant volume
-short_entry = downtrend_cross and volume_confirmed
 
 // ============================================================================
 // POSITION TRACKING
@@ -71,26 +60,15 @@ short_entry = downtrend_cross and volume_confirmed
 var int long_entry_bar = na
 var float long_entry_price = na
 
-// Track entry bar and price for short positions
-var int short_entry_bar = na
-var float short_entry_price = na
-
 // Update tracking on long entry
-if long_entry and strategy.position_size <= 0
+if long_entry and strategy.position_size == 0
     long_entry_bar := bar_index
     long_entry_price := close
-
-// Update tracking on short entry
-if short_entry and strategy.position_size >= 0
-    short_entry_bar := bar_index
-    short_entry_price := close
 
 // Reset tracking when position is closed
 if strategy.position_size == 0
     long_entry_bar := na
     long_entry_price := na
-    short_entry_bar := na
-    short_entry_price := na
 
 // ============================================================================
 // EXIT CONDITIONS - LONG
@@ -113,26 +91,6 @@ long_exit_stop = strategy.position_size > 0 and close <= long_stop_price
 long_exit = long_exit_ema or long_exit_time or long_exit_stop
 
 // ============================================================================
-// EXIT CONDITIONS - SHORT
-// ============================================================================
-
-// Calculate bars since short entry
-bars_since_short_entry = bar_index - nz(short_entry_bar, bar_index)
-
-// Condition 1: Price rose above EMA1 after at least 5 periods
-short_exit_ema = strategy.position_size < 0 and bars_since_short_entry >= min_periods_before_ema_exit and close > EMA1
-
-// Condition 2: 50 candlesticks have elapsed since entry
-short_exit_time = strategy.position_size < 0 and bars_since_short_entry >= max_bars_in_trade
-
-// Condition 3: 10% stop loss triggered (price rose 10% from entry)
-short_stop_price = nz(short_entry_price, close) * (1 + stop_loss_percent / 100)
-short_exit_stop = strategy.position_size < 0 and close >= short_stop_price
-
-// Combined short exit (any condition triggers exit)
-short_exit = short_exit_ema or short_exit_time or short_exit_stop
-
-// ============================================================================
 // STRATEGY EXECUTION
 // ============================================================================
 
@@ -140,17 +98,9 @@ short_exit = short_exit_ema or short_exit_time or short_exit_stop
 if long_entry
     strategy.entry("Long", strategy.long)
 
-// Enter short position on confirmed downtrend
-if short_entry
-    strategy.entry("Short", strategy.short)
-
 // Exit long position
 if long_exit
     strategy.close("Long")
-
-// Exit short position
-if short_exit
-    strategy.close("Short")
 
 // ============================================================================
 // VISUALIZATION
@@ -161,18 +111,15 @@ plot(EMA1, "EMA1 (21)", color=color.new(color.blue, 0), linewidth=2)
 plot(EMA2, "EMA2 (50)", color=color.new(color.orange, 0), linewidth=2)
 plot(EMA3, "EMA3 (99)", color=color.new(color.red, 0), linewidth=2)
 
-// Plot entry signals
+// Plot entry signal
 plotshape(long_entry, "Long Entry", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small)
-plotshape(short_entry, "Short Entry", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small)
 
-// Plot exit signals
+// Plot exit signal
 plotshape(long_exit and strategy.position_size > 0, "Long Exit", shape.xcross, location.abovebar, color.new(color.orange, 0), size=size.tiny)
-plotshape(short_exit and strategy.position_size < 0, "Short Exit", shape.xcross, location.belowbar, color.new(color.orange, 0), size=size.tiny)
 
-// Background color to show current trend state
+// Background color to show when in uptrend (EMA1 above both)
 ema1_above_both = EMA1 > EMA2 and EMA1 > EMA3
-ema1_below_both = EMA1 < EMA2 and EMA1 < EMA3
-bgcolor(ema1_above_both ? color.new(color.green, 90) : ema1_below_both ? color.new(color.red, 90) : na)
+bgcolor(ema1_above_both ? color.new(color.green, 90) : na)
 
 // ============================================================================
 // INFORMATION TABLE
@@ -197,10 +144,10 @@ if barstate.islast
     table.cell(info_table, 1, 4, str.tostring(Volume_Test, "#.##"), text_color=volume_confirmed ? color.green : color.red, text_size=size.small)
 
     table.cell(info_table, 0, 5, "Position", text_color=color.white, text_size=size.small)
-    pos_text = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
-    pos_color = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    pos_text = strategy.position_size > 0 ? "LONG" : "FLAT"
+    pos_color = strategy.position_size > 0 ? color.green : color.gray
     table.cell(info_table, 1, 5, pos_text, text_color=pos_color, text_size=size.small)
 
     table.cell(info_table, 0, 6, "Bars in Trade", text_color=color.white, text_size=size.small)
-    bars_in = strategy.position_size > 0 ? bars_since_long_entry : strategy.position_size < 0 ? bars_since_short_entry : 0
+    bars_in = strategy.position_size > 0 ? bars_since_long_entry : 0
     table.cell(info_table, 1, 6, str.tostring(bars_in), text_color=color.white, text_size=size.small)
