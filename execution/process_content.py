@@ -31,6 +31,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlparse, urlunparse
 
 # ---------------------------------------------------------------------------
@@ -117,7 +118,7 @@ def _make_nitter_url(original_url: str, nitter_domain: str) -> str:
 # Content fetching
 # ---------------------------------------------------------------------------
 
-def fetch_article_text(url: str) -> str | None:
+def fetch_article_text(url: str) -> Optional[str]:
     """
     Fetch the page at *url* and extract clean article text using trafilatura.
 
@@ -142,7 +143,7 @@ def fetch_article_text(url: str) -> str | None:
         return None
 
 
-def fetch_tweet_text(url: str) -> str | None:
+def fetch_tweet_text(url: str) -> Optional[str]:
     """
     Attempt to fetch tweet content via nitter proxy instances.
 
@@ -289,7 +290,7 @@ def _call_anthropic_vision(client, model: str, base64_data: str, media_type: str
 # Per-item processing
 # ---------------------------------------------------------------------------
 
-def process_item(client, item: dict) -> dict | None:
+def process_item(client, item: dict) -> Optional[dict]:
     """
     Process a single scraped message item and return a summary object.
 

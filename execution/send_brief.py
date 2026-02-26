@@ -22,6 +22,7 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Logging configuration
@@ -305,7 +306,7 @@ async def send_to_telegram(bot_token: str, chat_id: str, text: str) -> int:
 # Main logic
 # ---------------------------------------------------------------------------
 
-def read_brief() -> str | None:
+def read_brief() -> Optional[str]:
     """
     Read the brief from .tmp/brief.txt.
 

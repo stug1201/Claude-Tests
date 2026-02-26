@@ -22,6 +22,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Logging configuration
@@ -280,7 +281,7 @@ def build_prompt(summaries: list[dict]) -> str:
     return "\n".join(prompt_parts)
 
 
-def call_claude(prompt: str) -> str | None:
+def call_claude(prompt: str) -> Optional[str]:
     """
     Make a single API call to Claude claude-opus-4-6 with the given prompt.
 

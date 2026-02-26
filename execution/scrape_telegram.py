@@ -26,6 +26,7 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Logging configuration
@@ -65,7 +66,7 @@ URL_PATTERN = re.compile(
 )
 
 
-def extract_first_url(text: str | None) -> str | None:
+def extract_first_url(text: Optional[str]) -> Optional[str]:
     """Return the first HTTP(S) URL found in *text*, or None."""
     if not text:
         return None
@@ -321,7 +322,7 @@ async def scrape_channels() -> None:
                 # ----- Determine media type and extract data ------------------
                 text = message.text or ""
                 url = extract_first_url(text)
-                image_path: str | None = None
+                image_path: Optional[str] = None
                 media_type = "text"  # default
 
                 # Check for URL deduplication.
