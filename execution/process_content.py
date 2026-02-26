@@ -196,7 +196,7 @@ def fetch_tweet_text(url: str) -> Optional[str]:
     return None
 
 
-def read_image_as_base64(image_path: str) -> tuple[str, str] | None:
+def read_image_as_base64(image_path: str) -> Optional[tuple]:
     """
     Read an image file and return (base64_data, media_type).
 
