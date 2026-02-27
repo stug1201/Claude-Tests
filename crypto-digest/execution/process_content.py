@@ -275,38 +275,90 @@ def pre_filter_items(
 
 def _parse_numbered_response(text: str, expected_count: int) -> list[str]:
     """
-    Parse a numbered response (1. xxx  2. xxx ...) into a list of strings.
+    Parse a numbered response into a list of strings.
     Returns a list of length *expected_count*; missing entries are empty strings.
+
+    Handles many Claude output formats:
+      - "1. text", "1) text", "1: text"
+      - "**1.** text", "**1:** text", "**1** text"
+      - "**Image 1:** text", "**Image 1** text"
+      - "### 1.", "## Image 1", "# 1"
+      - "Image 1:", "Message 1:"
+
+    Falls back to paragraph-based splitting if no numbered sections are found.
     """
+    # Regex that matches a wide range of numbered heading patterns.
+    NUMBERED_PATTERN = re.compile(
+        r'^\s*'                              # leading whitespace
+        r'(?:#{1,4}\s*)?'                    # optional markdown headers
+        r'(?:\*\*)?'                         # optional opening bold
+        r'(?:Image|Message|Item)?\s*'        # optional label word
+        r'(\d+)'                             # THE NUMBER (captured)
+        r'(?:\*\*)?'                         # optional closing bold
+        r'\s*[.):\-—]\s*'                    # separator after number
+        r'(?:\*\*)?'                         # optional bold after separator
+        r'(.*)',                              # rest of the line
+        re.IGNORECASE,
+    )
+
     sections = [""] * expected_count
     current_idx = -1
     current_lines: list[str] = []
 
     for line in text.split("\n"):
-        # Match: "1.", "1)", "**1.**", "**1:**", "Image 1:", "Message 1:", etc.
-        m = re.match(
-            r'^\s*(?:\*\*)?(?:Image\s+|Message\s+)?(\d+)[.):\s]',
-            line,
-            re.IGNORECASE,
-        )
+        m = NUMBERED_PATTERN.match(line)
         if m:
             num = int(m.group(1))
-            # Flush previous section.
-            if 0 <= current_idx < expected_count:
-                sections[current_idx] = "\n".join(current_lines).strip()
-            current_idx = num - 1  # 1-indexed → 0-indexed
-            # Strip the number prefix from this line.
-            rest = re.sub(
-                r'^\s*(?:\*\*)?(?:Image\s+|Message\s+)?(\d+)[.):\s]+(?:\*\*)?\s*',
-                '', line, flags=re.IGNORECASE,
-            )
-            current_lines = [rest] if rest.strip() else []
-        elif current_idx >= 0:
+            if 1 <= num <= expected_count:
+                # Flush previous section.
+                if 0 <= current_idx < expected_count:
+                    sections[current_idx] = "\n".join(current_lines).strip()
+                current_idx = num - 1
+                rest = m.group(2).strip()
+                # Strip any trailing bold marker from rest.
+                rest = re.sub(r'\*\*$', '', rest).strip()
+                current_lines = [rest] if rest else []
+                continue
+        if current_idx >= 0:
             current_lines.append(line)
 
     # Flush the final section.
     if 0 <= current_idx < expected_count:
         sections[current_idx] = "\n".join(current_lines).strip()
+
+    # Check how many sections were actually found.
+    found = sum(1 for s in sections if s)
+
+    # Fallback: if numbered parsing found fewer than half the expected items,
+    # try splitting by double-newline paragraphs instead.
+    if found < expected_count // 2 + 1:
+        paragraphs = [p.strip() for p in re.split(r'\n\n+', text.strip()) if p.strip()]
+
+        if len(paragraphs) >= expected_count:
+            # We have enough paragraphs — assign one per item.
+            logger.info(
+                "Numbered parsing found %d/%d; falling back to paragraph split (%d paragraphs)",
+                found, expected_count, len(paragraphs),
+            )
+            for i in range(expected_count):
+                # Strip any leading number/label from the paragraph.
+                cleaned = re.sub(
+                    r'^(?:#{1,4}\s*)?(?:\*\*)?(?:Image|Message|Item)?\s*\d+[.):\-—\s]*(?:\*\*)?\s*',
+                    '', paragraphs[i], flags=re.IGNORECASE,
+                ).strip()
+                sections[i] = cleaned if cleaned else paragraphs[i]
+        elif len(paragraphs) > 0 and found == 0:
+            # Fewer paragraphs than expected but parser found nothing — use what we have.
+            logger.info(
+                "Numbered parsing found 0; using %d paragraphs for %d items",
+                len(paragraphs), expected_count,
+            )
+            for i in range(min(len(paragraphs), expected_count)):
+                cleaned = re.sub(
+                    r'^(?:#{1,4}\s*)?(?:\*\*)?(?:Image|Message|Item)?\s*\d+[.):\-—\s]*(?:\*\*)?\s*',
+                    '', paragraphs[i], flags=re.IGNORECASE,
+                ).strip()
+                sections[i] = cleaned if cleaned else paragraphs[i]
 
     return sections
 
@@ -320,11 +372,22 @@ def _process_text_batch(client, items: list[dict]) -> list[dict]:
         return []
 
     # Build the batched prompt.
-    parts = [
-        "Analyze the following messages and provide a concise summary "
-        "(2-4 sentences) for each one. Focus on key facts, figures, and "
-        "market implications. Number your summaries to match the input numbers.\n"
-    ]
+    if len(items) == 1:
+        parts = [
+            "Analyze the following message and provide a concise summary "
+            "(2-4 sentences). Focus on key facts, figures, and market implications.\n"
+        ]
+    else:
+        parts = [
+            "Analyze the following messages and provide a concise summary "
+            "(2-4 sentences) for each one. Focus on key facts, figures, and "
+            "market implications.\n\n"
+            "IMPORTANT: Format your response as a numbered list matching the "
+            "message numbers. Start each summary with the number followed by "
+            "a period, like:\n"
+            "1. [summary of message 1]\n"
+            "2. [summary of message 2]\n"
+        ]
 
     for i, item in enumerate(items, 1):
         channel = item.get("channel", "unknown")
@@ -355,11 +418,17 @@ def _process_text_batch(client, items: list[dict]) -> list[dict]:
             messages=[{"role": "user", "content": prompt}],
         )
         combined = response.content[0].text
-        parsed = _parse_numbered_response(combined, len(items))
+
+        # For single-item batches, use the full response (no parsing needed).
+        if len(items) == 1:
+            parsed = [combined.strip()]
+        else:
+            parsed = _parse_numbered_response(combined, len(items))
 
         summaries = []
         for i, item in enumerate(items):
-            if parsed[i]:
+            summary_text = parsed[i] if i < len(parsed) else ""
+            if summary_text:
                 url = item.get("url")
                 if url and is_tweet_url(url):
                     ctype = CONTENT_TYPE_TWEET
@@ -379,7 +448,7 @@ def _process_text_batch(client, items: list[dict]) -> list[dict]:
                 summaries.append({
                     "source_channel": item.get("channel", "unknown"),
                     "original_url": url,
-                    "summary_text": parsed[i],
+                    "summary_text": summary_text,
                     "content_type": ctype,
                 })
             else:
@@ -429,13 +498,19 @@ def _process_image_batch(client, items: list[dict]) -> list[dict]:
             ),
         })
     else:
+        # Very explicit format instructions to ensure parseable output.
         content.append({
             "type": "text",
             "text": (
-                f"There are {len(valid_items)} images above. For each image "
-                f"(numbered 1 to {len(valid_items)} in order), extract and "
-                f"describe any text, charts, price data, or market information "
-                f"visible. Number your descriptions to match the image order."
+                f"There are {len(valid_items)} images above. "
+                f"For each image, extract and describe any text, charts, "
+                f"price data, or market information visible.\n\n"
+                f"IMPORTANT: Format your response EXACTLY as follows, "
+                f"with each description starting on its own line:\n"
+                + "\n".join(
+                    f"{i}. [Your description of image {i} here]"
+                    for i in range(1, len(valid_items) + 1)
+                )
             ),
         })
 
@@ -448,8 +523,9 @@ def _process_image_batch(client, items: list[dict]) -> list[dict]:
             messages=[{"role": "user", "content": content}],
         )
         combined = response.content[0].text
+        logger.info("Image batch raw response length: %d chars", len(combined))
 
-        # Single image — no numbered parsing needed.
+        # Single image — use the full response.
         if len(valid_items) == 1:
             return [{
                 "source_channel": valid_items[0].get("channel", "unknown"),
@@ -471,6 +547,13 @@ def _process_image_batch(client, items: list[dict]) -> list[dict]:
                 })
             else:
                 logger.warning("No summary parsed for image batch item %d", i + 1)
+
+        # If parsing got nothing, log the start of the response for debugging.
+        if not summaries:
+            logger.warning(
+                "Image batch parsing failed. Response preview: %.300s",
+                combined,
+            )
 
         logger.info("Image batch produced %d/%d summaries", len(summaries), len(valid_items))
         return summaries
