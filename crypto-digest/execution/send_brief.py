@@ -64,44 +64,39 @@ SAMPLE_BRIEF = (
 
 def _count_open_formatting(text: str) -> dict:
     """
-    Count unmatched (open) Markdown formatting markers in *text*.
+    Count unmatched (open) Telegram Markdown formatting markers in *text*.
 
-    Tracks bold (**), italic (* but not **), and inline code (`).
-    Returns a dict mapping each marker to its open/closed state (True = open).
+    Telegram legacy Markdown uses:
+      *  for bold
+      _  for italic
+      `  for inline code
+
+    Returns a dict mapping each marker to True if it is currently unclosed.
     """
-    # We track whether we are currently "inside" each formatting marker.
-    state = {"**": False, "*": False, "`": False}
+    state = {"*": False, "_": False, "`": False}
 
-    # Bold first (** before *), so we consume ** tokens before single *.
-    bold_count = text.count("**")
-    state["**"] = bold_count % 2 == 1
-
-    # For italic we need to count single * that are NOT part of **.
-    # Remove all ** occurrences, then count remaining *.
-    stripped = text.replace("**", "")
-    italic_count = stripped.count("*")
-    state["*"] = italic_count % 2 == 1
-
-    code_count = text.count("`")
-    state["`"] = code_count % 2 == 1
+    for marker in ("*", "_", "`"):
+        count = text.count(marker)
+        state[marker] = count % 2 == 1
 
     return state
 
 
 def _close_open_formatting(text: str) -> str:
     """
-    Append closing markers for any markdown formatting left open in *text*.
-    This prevents Telegram from rejecting a chunk that has unmatched markers.
+    Append closing markers for any Telegram Markdown formatting left open
+    in *text*. This prevents Telegram from rejecting a chunk that has
+    unmatched markers.
     """
     state = _count_open_formatting(text)
     suffix = ""
     # Close in reverse nesting order: code, then italic, then bold.
     if state["`"]:
         suffix += "`"
+    if state["_"]:
+        suffix += "_"
     if state["*"]:
         suffix += "*"
-    if state["**"]:
-        suffix += "**"
     return text + suffix
 
 
@@ -113,10 +108,10 @@ def _reopen_formatting(text: str) -> str:
     state = _count_open_formatting(text)
     prefix = ""
     # Open in nesting order: bold, italic, code.
-    if state["**"]:
-        prefix += "**"
     if state["*"]:
         prefix += "*"
+    if state["_"]:
+        prefix += "_"
     if state["`"]:
         prefix += "`"
     return prefix
@@ -219,7 +214,7 @@ def split_message(text: str) -> list[str]:
 
         # Determine what formatting is still open at the end of this chunk.
         state = _count_open_formatting(chunk)
-        any_open = state["**"] or state["*"] or state["`"]
+        any_open = state["*"] or state["_"] or state["`"]
 
         if any_open:
             # Close the open formatting for this chunk and carry it forward.
@@ -236,6 +231,20 @@ def split_message(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # Telegram sending
 # ---------------------------------------------------------------------------
+
+def _sanitize_telegram_markdown(text: str) -> str:
+    """
+    Sanitize text for Telegram's legacy Markdown parser.
+
+    Ensures all formatting entities (*, _, `) are properly paired. If any
+    marker has an odd count (i.e. one is left unclosed), a closing marker
+    is appended. This prevents "can't find end of the entity" parse errors.
+    """
+    for marker in ("*", "_", "`"):
+        if text.count(marker) % 2 != 0:
+            text += marker
+    return text
+
 
 async def send_to_telegram(bot_token: str, chat_id: str, text: str) -> int:
     """
@@ -254,6 +263,8 @@ async def send_to_telegram(bot_token: str, chat_id: str, text: str) -> int:
     sent_count = 0
 
     for i, chunk in enumerate(chunks):
+        # Sanitize each chunk to ensure all Markdown entities are closed.
+        chunk = _sanitize_telegram_markdown(chunk)
         try:
             await bot.send_message(
                 chat_id=chat_id,

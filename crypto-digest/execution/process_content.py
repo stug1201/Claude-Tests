@@ -2,17 +2,22 @@
 """
 process_content.py - Process and summarise scraped Telegram content.
 
-Reads message objects from .tmp/scraped.json (output of scrape_telegram.py),
-classifies each item by content type, fetches full article text where possible,
-and generates summaries using the appropriate Claude model.
+Uses a two-phase pipeline designed for low API rate limits (5 req/min):
 
-Model routing (hardcoded):
-    - Long articles (>1000 words):  claude-opus-4-5
-    - Short articles (<=1000 words): claude-sonnet-4-6
-    - Tweet URLs:                    nitter scrape first, then claude-sonnet-4-6
-    - Images:                        claude-sonnet-4-6 (vision)
-    - Plain text:                    claude-sonnet-4-6
-    - Unfetchable URLs:              claude-sonnet-4-6 on preview text only
+  Phase 1 — Pre-filter (zero API calls):
+      Scores each scraped item using text heuristics (length, URL presence,
+      channel diversity) and keeps only the top N highest-signal items.
+
+  Phase 2 — Batched processing:
+      Groups selected items into batched API calls: text items batched
+      5 per prompt, images batched 3 per vision call. Calls are made
+      sequentially with rate-limit-safe delays between them.
+
+Model routing:
+    - All item processing:  claude-sonnet-4-6
+    - Tweet URLs:           nitter scrape first, then included in text batch
+    - Images:               batched vision calls (3 per call)
+    - Articles:             fetched via trafilatura, then included in text batch
 
 Usage:
     python execution/process_content.py          # Process live data
@@ -27,9 +32,7 @@ import mimetypes
 import os
 import re
 import sys
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, urlunparse
@@ -56,17 +59,22 @@ SUMMARIES_PATH = TMP_DIR / "summaries.json"
 IMAGES_DIR = TMP_DIR / "images"
 ENV_PATH = PROJECT_ROOT / ".env"
 
-# Model identifiers (hardcoded, not configurable).
-MODEL_OPUS = "claude-opus-4-5"
+# Model — all item processing goes through Sonnet.
 MODEL_SONNET = "claude-sonnet-4-6"
 
-# Word count thresholds.
-LONG_ARTICLE_THRESHOLD = 1000   # Words above this -> opus
-MAX_ARTICLE_WORDS = 10000       # Truncate articles longer than this
+# Pre-filter: keep only the top N items after scoring.
+MAX_ITEMS_TO_PROCESS = 20
 
-# Concurrency settings.
-MAX_WORKERS = 8
-API_RATE_LIMIT_SLEEP = 0.5  # Seconds to sleep between Anthropic API calls
+# Batching: how many items per single API call.
+TEXT_BATCH_SIZE = 5
+IMAGE_BATCH_SIZE = 3
+
+# Rate limiting: seconds to wait between API calls.
+# At 5 req/min the minimum safe interval is 12s; we add 1s buffer.
+RATE_LIMIT_DELAY = 13.0
+
+# Word count limits for articles included in batch prompts.
+MAX_ARTICLE_WORDS = 2000
 
 # Nitter instances to try, in order.
 NITTER_INSTANCES = ["nitter.net", "nitter.privacydev.net"]
@@ -79,51 +87,30 @@ CONTENT_TYPE_IMAGE = "image"
 CONTENT_TYPE_PLAIN_TEXT = "plain_text"
 CONTENT_TYPE_UNFETCHABLE = "unfetchable_url"
 
-# Threading lock for Anthropic API calls (rate limiting).
-_api_lock = threading.Lock()
-
 
 # ---------------------------------------------------------------------------
 # URL classification helpers
 # ---------------------------------------------------------------------------
 
 def is_tweet_url(url: str) -> bool:
-    """
-    Check whether *url* points to a tweet on X/Twitter.
-
-    Matches URLs containing 'x.com/', 'twitter.com/', or 't.co/'.
-    """
+    """Check whether *url* points to a tweet on X/Twitter."""
     if not url:
         return False
-    return bool(
-        "x.com/" in url
-        or "twitter.com/" in url
-        or "t.co/" in url
-    )
+    return "x.com/" in url or "twitter.com/" in url or "t.co/" in url
 
 
 def _make_nitter_url(original_url: str, nitter_domain: str) -> str:
-    """
-    Replace the twitter/x.com domain in *original_url* with *nitter_domain*.
-
-    Handles x.com, twitter.com, and t.co domains.
-    """
+    """Replace the twitter/x.com domain with *nitter_domain*."""
     parsed = urlparse(original_url)
-    # Replace just the netloc (domain) portion.
-    new_parsed = parsed._replace(netloc=nitter_domain)
-    return urlunparse(new_parsed)
+    return urlunparse(parsed._replace(netloc=nitter_domain))
 
 
 # ---------------------------------------------------------------------------
-# Content fetching
+# Content fetching (web scraping only — no Anthropic API calls)
 # ---------------------------------------------------------------------------
 
 def fetch_article_text(url: str) -> Optional[str]:
-    """
-    Fetch the page at *url* and extract clean article text using trafilatura.
-
-    Returns the extracted text, or None if fetching or extraction fails.
-    """
+    """Fetch the page at *url* and extract clean article text via trafilatura."""
     try:
         import trafilatura
 
@@ -144,12 +131,7 @@ def fetch_article_text(url: str) -> Optional[str]:
 
 
 def fetch_tweet_text(url: str) -> Optional[str]:
-    """
-    Attempt to fetch tweet content via nitter proxy instances.
-
-    Tries each nitter instance in NITTER_INSTANCES. On the first success,
-    extracts text using trafilatura. Returns None if all instances fail.
-    """
+    """Attempt to fetch tweet content via nitter proxy instances."""
     import requests
     import trafilatura
 
@@ -163,59 +145,40 @@ def fetch_tweet_text(url: str) -> Optional[str]:
             })
             resp.raise_for_status()
 
-            # Try trafilatura first for clean extraction.
             clean_text = trafilatura.extract(resp.text)
             if clean_text and clean_text.strip():
                 logger.info("Successfully fetched tweet via %s", nitter_domain)
                 return clean_text
 
-            # Fallback: try BeautifulSoup to grab the tweet content.
             try:
                 from bs4 import BeautifulSoup
                 soup = BeautifulSoup(resp.text, "html.parser")
-                # Nitter wraps tweet content in .tweet-content class.
                 tweet_div = soup.find("div", class_="tweet-content")
                 if tweet_div and tweet_div.get_text(strip=True):
-                    logger.info(
-                        "Successfully fetched tweet via %s (BeautifulSoup)",
-                        nitter_domain,
-                    )
+                    logger.info("Fetched tweet via %s (BeautifulSoup)", nitter_domain)
                     return tweet_div.get_text(strip=True)
             except ImportError:
-                logger.debug("BeautifulSoup not available for fallback parsing")
+                pass
 
         except Exception as exc:
-            logger.warning(
-                "Nitter instance %s failed for %s: %s",
-                nitter_domain, url, exc,
-            )
+            logger.warning("Nitter instance %s failed for %s: %s", nitter_domain, url, exc)
             continue
 
-    # All nitter instances failed.
     logger.warning("All nitter instances failed for tweet: %s", url)
     return None
 
 
 def read_image_as_base64(image_path: str) -> Optional[tuple]:
-    """
-    Read an image file and return (base64_data, media_type).
-
-    Returns None if the file does not exist or cannot be read.
-    """
+    """Read an image file and return (base64_data, media_type)."""
     path = Path(image_path)
-
-    # If the path is relative, resolve it against the project root.
     if not path.is_absolute():
         path = PROJECT_ROOT / path
-
     if not path.exists():
         logger.error("Image file not found: %s", path)
         return None
 
-    # Determine MIME type from extension.
     mime_type, _ = mimetypes.guess_type(str(path))
     if mime_type is None:
-        # Default to JPEG for unknown image types.
         mime_type = "image/jpeg"
 
     try:
@@ -228,280 +191,377 @@ def read_image_as_base64(image_path: str) -> Optional[tuple]:
 
 
 # ---------------------------------------------------------------------------
-# Anthropic API helpers
+# Phase 1: Pre-filter — score and rank items (zero API calls)
 # ---------------------------------------------------------------------------
 
-def _call_anthropic_text(client, model: str, prompt: str) -> str:
+def score_item(item: dict) -> float:
     """
-    Send a text prompt to the Anthropic API with rate limiting.
-
-    Acquires the global API lock and sleeps for API_RATE_LIMIT_SLEEP seconds
-    to avoid hitting rate limits, then makes the API call.
+    Score an item by likely informational value. Higher = more important.
+    Uses only local heuristics — no API calls.
     """
-    with _api_lock:
-        time.sleep(API_RATE_LIMIT_SLEEP)
-
-    response = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return response.content[0].text
-
-
-def _call_anthropic_vision(client, model: str, base64_data: str, media_type: str) -> str:
-    """
-    Send an image to the Anthropic API for vision analysis with rate limiting.
-
-    Acquires the global API lock and sleeps for API_RATE_LIMIT_SLEEP seconds,
-    then sends the image with a description prompt.
-    """
-    with _api_lock:
-        time.sleep(API_RATE_LIMIT_SLEEP)
-
-    response = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": base64_data,
-                    },
-                },
-                {
-                    "type": "text",
-                    "text": (
-                        "Extract and describe any text, charts, price data, "
-                        "or market information visible"
-                    ),
-                },
-            ],
-        }],
-    )
-    return response.content[0].text
-
-
-# ---------------------------------------------------------------------------
-# Per-item processing
-# ---------------------------------------------------------------------------
-
-def process_item(client, item: dict) -> Optional[dict]:
-    """
-    Process a single scraped message item and return a summary object.
-
-    Determines the content type, fetches full text if needed, selects the
-    appropriate model, and calls the Anthropic API for summarisation.
-
-    Returns a summary dict, or None if the item should be skipped.
-    """
-    channel = item.get("channel", "unknown")
-    text = item.get("text", "")
+    score = 0.0
+    text = (item.get("text") or "").strip()
+    channel = item.get("channel", "")
     media_type = item.get("media_type", "text")
     url = item.get("url")
-    image_path = item.get("image_path")
 
-    # --- Image handling ---
-    if media_type == "image" and image_path:
-        logger.info("Processing image from %s: %s", channel, image_path)
+    # --- Text quality signals ---
+    if len(text) > 200:
+        score += 4
+    elif len(text) > 100:
+        score += 3
+    elif len(text) > 20:
+        score += 1
 
-        img_result = read_image_as_base64(image_path)
-        if img_result is None:
-            logger.error("Skipping unreadable image: %s", image_path)
-            return None
+    # --- Has a URL (articles/tweets carry more structured info) ---
+    if url:
+        score += 2
+        if is_tweet_url(url):
+            score += 1  # Tweets often contain breaking news
 
-        b64_data, mime = img_result
-        try:
-            summary = _call_anthropic_vision(client, MODEL_SONNET, b64_data, mime)
-            return {
-                "source_channel": channel,
-                "original_url": url,
-                "summary_text": summary,
-                "content_type": CONTENT_TYPE_IMAGE,
-            }
-        except Exception as exc:
-            logger.error("API error processing image %s: %s", image_path, exc)
-            return None
+    # --- Channel diversity ---
+    # Channels with fewer messages per day tend to be higher signal per post.
+    # ahboyashreads dominates with ~50 image posts; cap its representation.
+    if channel != "ahboyashreads":
+        score += 3
 
-    # --- Tweet URL handling ---
-    if url and is_tweet_url(url):
-        logger.info("Processing tweet from %s: %s", channel, url)
+    # --- Content type efficiency ---
+    # Plain text with content is cheapest to process.
+    if media_type == "text" and text:
+        score += 1
 
-        # Try nitter first.
-        tweet_text = fetch_tweet_text(url)
-        if tweet_text and tweet_text.strip():
-            # Successfully fetched tweet content via nitter.
-            prompt = f"Summarise this tweet:\n\n{tweet_text}"
-        else:
-            # Nitter failed — use URL and any available preview text.
-            preview = text.strip() if text and text.strip() else ""
-            if preview:
-                prompt = (
-                    f"Summarise this tweet based on the available information.\n"
-                    f"Tweet URL: {url}\n"
-                    f"Preview text: {preview}"
-                )
-            else:
-                prompt = (
-                    f"Summarise this tweet based on the URL alone.\n"
-                    f"Tweet URL: {url}"
-                )
+    # Image with caption text is higher value than bare image.
+    if media_type == "image" and len(text) > 10:
+        score += 1
 
-        try:
-            summary = _call_anthropic_text(client, MODEL_SONNET, prompt)
-            return {
-                "source_channel": channel,
-                "original_url": url,
-                "summary_text": summary,
-                "content_type": CONTENT_TYPE_TWEET,
-            }
-        except Exception as exc:
-            logger.error("API error processing tweet %s: %s", url, exc)
-            return None
+    return score
 
-    # --- URL (article) handling ---
-    if url and media_type == "url":
-        logger.info("Processing URL from %s: %s", channel, url)
 
-        clean_text = fetch_article_text(url)
-
-        if clean_text is None or not clean_text.strip():
-            # Unfetchable URL — fall back to preview text from Telegram message.
-            logger.info("URL unfetchable, using preview text: %s", url)
-            preview = text.strip() if text and text.strip() else ""
-            if not preview:
-                logger.warning(
-                    "Skipping unfetchable URL with no preview text: %s", url
-                )
-                return None
-
-            prompt = (
-                f"Summarise the following content preview for an article that "
-                f"could not be fully fetched.\n"
-                f"URL: {url}\n"
-                f"Preview: {preview}"
-            )
-            try:
-                summary = _call_anthropic_text(client, MODEL_SONNET, prompt)
-                return {
-                    "source_channel": channel,
-                    "original_url": url,
-                    "summary_text": summary,
-                    "content_type": CONTENT_TYPE_UNFETCHABLE,
-                }
-            except Exception as exc:
-                logger.error(
-                    "API error processing unfetchable URL %s: %s", url, exc
-                )
-                return None
-
-        # Article successfully fetched. Count words on clean extracted text.
-        word_count = len(clean_text.split())
+def pre_filter_items(
+    items: list[dict], max_items: int = MAX_ITEMS_TO_PROCESS
+) -> list[dict]:
+    """
+    Score all items, sort by score descending, return the top *max_items*.
+    """
+    if len(items) <= max_items:
         logger.info(
-            "Fetched article from %s: %d words", url, word_count,
+            "Pre-filter: all %d items kept (at or below threshold of %d)",
+            len(items), max_items,
         )
+        return items
 
-        # Truncate very long articles to stay within context limits.
-        if word_count > MAX_ARTICLE_WORDS:
-            logger.info(
-                "Truncating article from %d to %d words", word_count, MAX_ARTICLE_WORDS
-            )
-            words = clean_text.split()
-            clean_text = " ".join(words[:MAX_ARTICLE_WORDS])
-            word_count = MAX_ARTICLE_WORDS
+    scored = [(score_item(item), i, item) for i, item in enumerate(items)]
+    # Sort by score descending, then by original order for ties.
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    selected = [item for _, _, item in scored[:max_items]]
 
-        # Select model based on word count.
-        if word_count > LONG_ARTICLE_THRESHOLD:
-            model = MODEL_OPUS
-            content_type = CONTENT_TYPE_LONG_ARTICLE
-        else:
-            model = MODEL_SONNET
-            content_type = CONTENT_TYPE_SHORT_ARTICLE
+    # Log channel distribution.
+    kept_channels: dict[str, int] = {}
+    for _, _, item in scored[:max_items]:
+        ch = item.get("channel", "?")
+        kept_channels[ch] = kept_channels.get(ch, 0) + 1
 
-        prompt = f"Summarise the following article:\n\n{clean_text}"
-        try:
-            summary = _call_anthropic_text(client, model, prompt)
-            return {
-                "source_channel": channel,
-                "original_url": url,
-                "summary_text": summary,
-                "content_type": content_type,
-            }
-        except Exception as exc:
-            logger.error("API error processing article %s: %s", url, exc)
-            return None
-
-    # --- Plain text handling ---
-    if text and text.strip():
-        logger.info("Processing plain text from %s", channel)
-
-        prompt = f"Summarise the following message:\n\n{text.strip()}"
-        try:
-            summary = _call_anthropic_text(client, MODEL_SONNET, prompt)
-            return {
-                "source_channel": channel,
-                "original_url": None,
-                "summary_text": summary,
-                "content_type": CONTENT_TYPE_PLAIN_TEXT,
-            }
-        except Exception as exc:
-            logger.error("API error processing plain text from %s: %s", channel, exc)
-            return None
-
-    # Nothing to process (empty text, no URL, no image).
-    logger.warning("Skipping empty item from %s", channel)
-    return None
+    logger.info(
+        "Pre-filter: %d/%d items selected. Per-channel: %s",
+        max_items, len(items),
+        ", ".join(f"{ch}={n}" for ch, n in sorted(kept_channels.items())),
+    )
+    return selected
 
 
 # ---------------------------------------------------------------------------
-# Batch processing
+# Phase 2: Batched API calls
+# ---------------------------------------------------------------------------
+
+def _parse_numbered_response(text: str, expected_count: int) -> list[str]:
+    """
+    Parse a numbered response (1. xxx  2. xxx ...) into a list of strings.
+    Returns a list of length *expected_count*; missing entries are empty strings.
+    """
+    sections = [""] * expected_count
+    current_idx = -1
+    current_lines: list[str] = []
+
+    for line in text.split("\n"):
+        # Match: "1.", "1)", "**1.**", "**1:**", "Image 1:", "Message 1:", etc.
+        m = re.match(
+            r'^\s*(?:\*\*)?(?:Image\s+|Message\s+)?(\d+)[.):\s]',
+            line,
+            re.IGNORECASE,
+        )
+        if m:
+            num = int(m.group(1))
+            # Flush previous section.
+            if 0 <= current_idx < expected_count:
+                sections[current_idx] = "\n".join(current_lines).strip()
+            current_idx = num - 1  # 1-indexed → 0-indexed
+            # Strip the number prefix from this line.
+            rest = re.sub(
+                r'^\s*(?:\*\*)?(?:Image\s+|Message\s+)?(\d+)[.):\s]+(?:\*\*)?\s*',
+                '', line, flags=re.IGNORECASE,
+            )
+            current_lines = [rest] if rest.strip() else []
+        elif current_idx >= 0:
+            current_lines.append(line)
+
+    # Flush the final section.
+    if 0 <= current_idx < expected_count:
+        sections[current_idx] = "\n".join(current_lines).strip()
+
+    return sections
+
+
+def _process_text_batch(client, items: list[dict]) -> list[dict]:
+    """
+    Process a batch of text-based items in a single API call.
+    Returns a list of summary dicts.
+    """
+    if not items:
+        return []
+
+    # Build the batched prompt.
+    parts = [
+        "Analyze the following messages and provide a concise summary "
+        "(2-4 sentences) for each one. Focus on key facts, figures, and "
+        "market implications. Number your summaries to match the input numbers.\n"
+    ]
+
+    for i, item in enumerate(items, 1):
+        channel = item.get("channel", "unknown")
+        text = (item.get("text") or "").strip()
+        url = item.get("url", "")
+        fetched = item.get("_fetched_text", "")
+
+        parts.append(f"\n--- Message {i} (from {channel}) ---")
+        if url:
+            parts.append(f"URL: {url}")
+        if fetched:
+            words = fetched.split()
+            if len(words) > MAX_ARTICLE_WORDS:
+                fetched = " ".join(words[:MAX_ARTICLE_WORDS]) + " [truncated]"
+            parts.append(f"Article content:\n{fetched}")
+        elif text:
+            parts.append(f"Content: {text}")
+        else:
+            parts.append("Content: (no text available)")
+
+    prompt = "\n".join(parts)
+    logger.info("Text batch: %d items, prompt %d chars", len(items), len(prompt))
+
+    try:
+        response = client.messages.create(
+            model=MODEL_SONNET,
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        combined = response.content[0].text
+        parsed = _parse_numbered_response(combined, len(items))
+
+        summaries = []
+        for i, item in enumerate(items):
+            if parsed[i]:
+                url = item.get("url")
+                if url and is_tweet_url(url):
+                    ctype = CONTENT_TYPE_TWEET
+                elif url and item.get("media_type") == "url":
+                    fetched_text = item.get("_fetched_text", "")
+                    if fetched_text and len(fetched_text.split()) > 1000:
+                        ctype = CONTENT_TYPE_LONG_ARTICLE
+                    elif fetched_text:
+                        ctype = CONTENT_TYPE_SHORT_ARTICLE
+                    else:
+                        ctype = CONTENT_TYPE_UNFETCHABLE
+                elif url:
+                    ctype = CONTENT_TYPE_UNFETCHABLE
+                else:
+                    ctype = CONTENT_TYPE_PLAIN_TEXT
+
+                summaries.append({
+                    "source_channel": item.get("channel", "unknown"),
+                    "original_url": url,
+                    "summary_text": parsed[i],
+                    "content_type": ctype,
+                })
+            else:
+                logger.warning("No summary parsed for text batch item %d", i + 1)
+
+        logger.info("Text batch produced %d/%d summaries", len(summaries), len(items))
+        return summaries
+
+    except Exception as exc:
+        logger.error("Text batch API call failed: %s", exc)
+        return []
+
+
+def _process_image_batch(client, items: list[dict]) -> list[dict]:
+    """
+    Process a batch of images in a single vision API call.
+    Returns a list of summary dicts.
+    """
+    if not items:
+        return []
+
+    content: list[dict] = []
+    valid_items: list[dict] = []
+
+    for item in items:
+        img = read_image_as_base64(item.get("image_path", ""))
+        if img is None:
+            logger.warning("Skipping unreadable image: %s", item.get("image_path"))
+            continue
+        b64, mime = img
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": mime, "data": b64},
+        })
+        valid_items.append(item)
+
+    if not valid_items:
+        return []
+
+    # Add the instruction text.
+    if len(valid_items) == 1:
+        content.append({
+            "type": "text",
+            "text": (
+                "Extract and describe any text, charts, price data, or "
+                "market information visible in this image."
+            ),
+        })
+    else:
+        content.append({
+            "type": "text",
+            "text": (
+                f"There are {len(valid_items)} images above. For each image "
+                f"(numbered 1 to {len(valid_items)} in order), extract and "
+                f"describe any text, charts, price data, or market information "
+                f"visible. Number your descriptions to match the image order."
+            ),
+        })
+
+    logger.info("Image batch: %d images", len(valid_items))
+
+    try:
+        response = client.messages.create(
+            model=MODEL_SONNET,
+            max_tokens=2048,
+            messages=[{"role": "user", "content": content}],
+        )
+        combined = response.content[0].text
+
+        # Single image — no numbered parsing needed.
+        if len(valid_items) == 1:
+            return [{
+                "source_channel": valid_items[0].get("channel", "unknown"),
+                "original_url": valid_items[0].get("url"),
+                "summary_text": combined.strip(),
+                "content_type": CONTENT_TYPE_IMAGE,
+            }]
+
+        # Multi-image — parse numbered descriptions.
+        parsed = _parse_numbered_response(combined, len(valid_items))
+        summaries = []
+        for i, item in enumerate(valid_items):
+            if parsed[i]:
+                summaries.append({
+                    "source_channel": item.get("channel", "unknown"),
+                    "original_url": item.get("url"),
+                    "summary_text": parsed[i],
+                    "content_type": CONTENT_TYPE_IMAGE,
+                })
+            else:
+                logger.warning("No summary parsed for image batch item %d", i + 1)
+
+        logger.info("Image batch produced %d/%d summaries", len(summaries), len(valid_items))
+        return summaries
+
+    except Exception as exc:
+        logger.error("Image batch API call failed: %s", exc)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Main processing pipeline
 # ---------------------------------------------------------------------------
 
 def process_all(items: list[dict]) -> list[dict]:
     """
-    Process all scraped items concurrently using a thread pool.
-
-    Initialises the Anthropic client, dispatches items to worker threads,
-    collects results, and returns a list of summary dicts.
-
-    Items that fail are logged and skipped (the batch is never aborted).
+    Two-phase pipeline:
+      1. Pre-filter items by heuristic score (no API calls)
+      2. Pre-fetch article/tweet text via web scraping (no API calls)
+      3. Batch items and process via Anthropic API with rate-safe delays
     """
     import anthropic
 
-    client = anthropic.Anthropic()  # Reads ANTHROPIC_API_KEY from env.
+    client = anthropic.Anthropic()
 
-    summaries: list[dict] = []
+    # Phase 1: Pre-filter.
+    selected = pre_filter_items(items)
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Submit all items for concurrent processing.
-        future_to_index = {
-            executor.submit(process_item, client, item): i
-            for i, item in enumerate(items)
-        }
-
-        for future in as_completed(future_to_index):
-            idx = future_to_index[future]
-            try:
-                result = future.result()
-                if result is not None:
-                    summaries.append(result)
+    # Phase 1.5: Pre-fetch URLs (web scraping only, no Anthropic API calls).
+    for item in selected:
+        url = item.get("url")
+        if url and item.get("media_type") == "url":
+            logger.info("Pre-fetching URL: %s", url)
+            if is_tweet_url(url):
+                item["_fetched_text"] = fetch_tweet_text(url) or ""
+            else:
+                fetched = fetch_article_text(url) or ""
+                item["_fetched_text"] = fetched
+                if fetched:
                     logger.info(
-                        "Item %d processed successfully (%s)",
-                        idx, result["content_type"],
+                        "Fetched %d words from %s",
+                        len(fetched.split()), url,
                     )
-                else:
-                    logger.info("Item %d skipped (no result)", idx)
-            except Exception as exc:
-                # Catch any unexpected exceptions from the thread.
-                logger.error("Item %d raised an unexpected error: %s", idx, exc)
+
+    # Separate into image items and text items.
+    image_items = [
+        i for i in selected
+        if i.get("media_type") == "image" and i.get("image_path")
+    ]
+    text_items = [i for i in selected if i not in image_items]
 
     logger.info(
-        "Processing complete: %d/%d items produced summaries",
-        len(summaries), len(items),
+        "Processing %d text items + %d image items = %d total",
+        len(text_items), len(image_items), len(text_items) + len(image_items),
+    )
+
+    summaries: list[dict] = []
+    api_call_count = 0
+
+    # Phase 2a: Process text batches.
+    for batch_start in range(0, len(text_items), TEXT_BATCH_SIZE):
+        batch = text_items[batch_start:batch_start + TEXT_BATCH_SIZE]
+
+        if api_call_count > 0:
+            logger.info(
+                "Rate limit pause: %.0fs before next API call...",
+                RATE_LIMIT_DELAY,
+            )
+            time.sleep(RATE_LIMIT_DELAY)
+
+        results = _process_text_batch(client, batch)
+        summaries.extend(results)
+        api_call_count += 1
+
+    # Phase 2b: Process image batches.
+    for batch_start in range(0, len(image_items), IMAGE_BATCH_SIZE):
+        batch = image_items[batch_start:batch_start + IMAGE_BATCH_SIZE]
+
+        if api_call_count > 0:
+            logger.info(
+                "Rate limit pause: %.0fs before next API call...",
+                RATE_LIMIT_DELAY,
+            )
+            time.sleep(RATE_LIMIT_DELAY)
+
+        results = _process_image_batch(client, batch)
+        summaries.extend(results)
+        api_call_count += 1
+
+    logger.info(
+        "Processing complete: %d/%d selected items produced summaries (%d API calls)",
+        len(summaries), len(selected), api_call_count,
     )
     return summaries
 
@@ -511,12 +571,7 @@ def process_all(items: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def load_scraped_data() -> list[dict]:
-    """
-    Load scraped message objects from .tmp/scraped.json.
-
-    Returns the list of message dicts, or exits with an error if the file
-    is missing or malformed.
-    """
+    """Load scraped message objects from .tmp/scraped.json."""
     if not SCRAPED_PATH.exists():
         logger.error("Scraped data file not found at %s", SCRAPED_PATH)
         sys.exit(1)
@@ -528,7 +583,10 @@ def load_scraped_data() -> list[dict]:
         sys.exit(1)
 
     if not isinstance(data, list):
-        logger.error("Expected a JSON array in %s, got %s", SCRAPED_PATH, type(data).__name__)
+        logger.error(
+            "Expected a JSON array in %s, got %s",
+            SCRAPED_PATH, type(data).__name__,
+        )
         sys.exit(1)
 
     logger.info("Loaded %d items from %s", len(data), SCRAPED_PATH)
@@ -536,11 +594,7 @@ def load_scraped_data() -> list[dict]:
 
 
 def write_summaries(summaries: list[dict]) -> None:
-    """
-    Write the list of summary objects to .tmp/summaries.json.
-
-    Creates the .tmp/ directory if it does not exist.
-    """
+    """Write the list of summary objects to .tmp/summaries.json."""
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     SUMMARIES_PATH.write_text(
         json.dumps(summaries, indent=2, ensure_ascii=False),
@@ -554,12 +608,7 @@ def write_summaries(summaries: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 def run_test_mode() -> None:
-    """
-    --test mode: generate fixture summaries without making any API calls.
-
-    Writes a small set of fake summary objects to .tmp/summaries.json so that
-    downstream scripts can be tested independently.
-    """
+    """--test mode: generate fixture summaries without making any API calls."""
     logger.info("Running in test mode — using fixture data, no API calls")
 
     fixture_summaries = [
@@ -626,9 +675,7 @@ def run_test_mode() -> None:
         },
     ]
 
-    # Ensure .tmp/ directory exists.
     TMP_DIR.mkdir(parents=True, exist_ok=True)
-
     write_summaries(fixture_summaries)
 
     print("=" * 60)
@@ -648,14 +695,12 @@ def run_test_mode() -> None:
 
 def run_production() -> None:
     """
-    Production path: load .env, read scraped data, process all items
-    concurrently, and write summaries to .tmp/summaries.json.
+    Production path: load .env, read scraped data, run the two-phase
+    pipeline, and write summaries to .tmp/summaries.json.
     """
-    # Load environment variables from .env file.
     from dotenv import load_dotenv
     load_dotenv(dotenv_path=ENV_PATH)
 
-    # Verify the API key is available.
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         logger.error(
@@ -664,7 +709,6 @@ def run_production() -> None:
         )
         sys.exit(1)
 
-    # Load scraped messages.
     items = load_scraped_data()
 
     if not items:
@@ -672,12 +716,8 @@ def run_production() -> None:
         write_summaries([])
         return
 
-    # Process all items concurrently.
     summaries = process_all(items)
-
-    # Write results.
     write_summaries(summaries)
-
     logger.info("Done. %d summaries written to %s", len(summaries), SUMMARIES_PATH)
 
 
