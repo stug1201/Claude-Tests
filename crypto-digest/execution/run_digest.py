@@ -16,7 +16,12 @@ Usage:
 import subprocess
 import sys
 import logging
+from pathlib import Path
 from datetime import datetime, timezone
+
+# Resolve the project root (parent of execution/) so script paths work
+# regardless of the working directory the orchestrator is invoked from.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Configure logging
 logging.basicConfig(
@@ -69,7 +74,7 @@ def run_stage(stage: dict, test_mode: bool) -> bool:
     logger.info(f"--- Starting stage: {name} ---")
     start_time = datetime.now(timezone.utc)
 
-    cmd = [sys.executable, script]
+    cmd = [sys.executable, str(PROJECT_ROOT / script)]
     if test_mode:
         cmd.append("--test")
 
