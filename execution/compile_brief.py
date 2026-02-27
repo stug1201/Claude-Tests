@@ -50,7 +50,7 @@ ENV_PATH = PROJECT_ROOT / ".env"
 MODEL = "claude-opus-4-6"
 
 # Maximum tokens for the Claude response.
-MAX_TOKENS = 4096
+MAX_TOKENS = 8192
 
 # ---------------------------------------------------------------------------
 # Fallback messages
@@ -83,20 +83,20 @@ Professional financial analytics — precise, neutral, and authoritative. Write 
 - Use Telegram-compatible Markdown: bold with *, italic with _ for headers and key terms only. Do not over-format.
 
 ### Structure
-1. *Market Overview* (opening): 3-4 sentence paragraph synthesising the dominant themes of the past 24 hours at a high level, written in prose.
-2. *Key Developments*: Flag 1-2 highest signal items at the top — items with meaningful market implications, not just interesting news.
+1. *Market Overview* (opening): 4-6 sentence paragraph synthesising the dominant themes of the past 24 hours at a high level, written in prose. Cover the macro backdrop, digital asset market tone, and any standout moves or events.
+2. *Key Developments*: Flag 2-4 highest signal items at the top — items with meaningful market implications, not just interesting news.
 3. Thematic Sections (use only those that have material):
    - Macro & Risk
    - Digital Assets
    - DeFi & Protocols
    - Regulation & Policy
    - Notable Reads
-4. Each item: 2-3 sentences, factual and direct, followed by source link on a new line: Source: [url]
+4. Each item: 3-5 sentences. Synthesise the data point thoroughly — include context, specific figures, and why it matters. Follow with source link on a new line: Source: [url]
 5. Numbers and percentages stated precisely where available (write "BTC declined 4.2% over the session" not "Bitcoin saw a notable drop").
 6. Omit any section for which there is no material that day.
 
 ### Length
-The brief should be digestible in under 3 minutes. Density over length.
+Do not artificially constrain overall length — the brief should be as long as needed to cover every meaningful data point with adequate depth. Prioritise thorough synthesis of each item over brevity. However, do not pad with filler; every sentence should carry informational weight.
 
 ### Important
 - Do NOT use emojis anywhere in the output.
