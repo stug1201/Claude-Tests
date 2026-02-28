@@ -70,8 +70,9 @@ Claude-Tests/
 **Before starting any new project:**
 1. Explore the existing project folders to understand the patterns, conventions, and architecture already in use
 2. Study the `directives/` and `execution/` scripts in existing projects — they demonstrate the 3-layer architecture in practice
-3. Follow the same structure for your new project: create a new top-level subfolder with its own `directives/`, `execution/`, `requirements.txt`, and `README.md`
-4. If the project needs a GitHub Actions workflow, add it to `.github/workflows/` with paths pointing into the project subfolder
+3. **Read `LESSONS_LEARNED.md` in any existing project folder before building something similar.** These files capture hard-won debugging insights, rate limit gotchas, and architectural mistakes that were already paid for once. Learning from them is free.
+4. Follow the same structure for your new project: create a new top-level subfolder with its own `directives/`, `execution/`, `requirements.txt`, and `README.md`
+5. If the project needs a GitHub Actions workflow, add it to `.github/workflows/` with paths pointing into the project subfolder
 
 **Within each project:**
 - `.tmp/` - All intermediate files (scraped data, temp exports). Never commit, always regenerated.
@@ -80,6 +81,17 @@ Claude-Tests/
 - `.env` - Environment variables and API keys (in `.gitignore`)
 
 **Key principle:** Local files are only for processing. Deliverables live in cloud services or messaging platforms where the user can access them. Everything in `.tmp/` can be deleted and regenerated.
+
+## When a Project Reaches Feature-Update Stage
+
+When the user tells you a project is mature, stable, and moving into a maintenance/feature-update phase, you must write a `LESSONS_LEARNED.md` file in that project's root directory before closing out. This file should be approximately 1000 words and cover:
+
+1. **What broke and why** — the specific failures encountered during development, their root causes, and how they were fixed
+2. **Architectural decisions** — what design choices were made, which ones held up, and which ones had to be reworked
+3. **Best practices discovered** — concrete, reusable principles that future agents should apply to similar projects
+4. **A summary table** — quick-reference mapping of mistakes to their costs, fixes, and prevention strategies
+
+This is not optional documentation — it is part of the self-annealing loop. The insights from building one project become the starting knowledge for the next. Future agents are instructed to read these files before starting related work (see "Before starting any new project" above).
 
 ## Summary
 
