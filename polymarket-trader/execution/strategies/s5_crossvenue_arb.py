@@ -721,9 +721,23 @@ class CrossVenueArbEngine:
     # Price fetching
     # ------------------------------------------------------------------
 
+    # Additional fixture prices for pairs not in market_matcher fixtures.
+    # These have wider spreads to exercise the signal emission path.
+    _EXTRA_FIXTURE_PRICES: dict[str, dict[str, float]] = {
+        "0xPOLY_NBA_FINALS": {
+            "yes_price": 0.30, "no_price": 0.70,
+        },
+        "KXNBA-2026-BOS": {
+            "yes_price": 0.37, "no_price": 0.63,
+        },
+    }
+
     def _get_fixture_prices(self, pair: dict) -> Optional[dict]:
         """
         Get simulated prices for a fixture pair in test mode.
+
+        First checks market_matcher fixture data, then falls back to
+        extra fixture prices defined locally for S5 testing.
 
         Returns a dict with poly_yes, poly_no, kalshi_yes, kalshi_no,
         and a simulated min_book_depth.
@@ -747,6 +761,12 @@ class CrossVenueArbEngine:
             if m["market_id"] == kalshi_id:
                 kalshi_data = m
                 break
+
+        # Fall back to extra fixture prices for S5-specific test pairs.
+        if poly_data is None and poly_id in self._EXTRA_FIXTURE_PRICES:
+            poly_data = {"market_id": poly_id, **self._EXTRA_FIXTURE_PRICES[poly_id]}
+        if kalshi_data is None and kalshi_id in self._EXTRA_FIXTURE_PRICES:
+            kalshi_data = {"market_id": kalshi_id, **self._EXTRA_FIXTURE_PRICES[kalshi_id]}
 
         if poly_data is None or kalshi_data is None:
             return None
@@ -1034,12 +1054,12 @@ class CrossVenueArbEngine:
         """
         await self._load_bankroll()
 
-        if self.test_mode:
-            await self._run_test()
-            return
-
         if self.backtest_mode:
             await self._run_backtest()
+            return
+
+        if self.test_mode:
+            await self._run_test()
             return
 
         # Production loop.
