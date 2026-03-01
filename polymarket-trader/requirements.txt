@@ -1,0 +1,44 @@
+# =============================================================================
+# Polymarket Trader — Python Dependencies
+# =============================================================================
+# Install: pip install -r requirements.txt
+# Python 3.12+ required
+
+# --- Core async framework ---
+aiohttp>=3.9.0                   # Async HTTP client for API connectors
+websockets>=12.0                 # WebSocket client for Kalshi/Polymarket streaming
+
+# --- Database ---
+asyncpg>=0.29.0                  # Async PostgreSQL driver (for TimescaleDB)
+psycopg2-binary>=2.9.9           # Sync PostgreSQL driver (for migrations)
+
+# --- Redis ---
+redis[hiredis]>=5.0.0            # Redis client with hiredis C parser for speed
+
+# --- Cryptography (order signing) ---
+py-clob-client>=0.17.0           # Polymarket CLOB client (Ed25519 signing)
+cryptography>=42.0.0             # RSA-PSS for Kalshi token auth
+pynacl>=1.5.0                    # Ed25519 primitives (fallback signing)
+
+# --- ML / Data ---
+xgboost>=2.0.0                   # Wallet IPS classifier
+sentence-transformers>=2.7.0     # Market title semantic matching
+scikit-learn>=1.4.0              # ML utilities (train/test split, metrics)
+numpy>=1.26.0                    # Numerical computing
+pandas>=2.2.0                    # Data manipulation for backtesting
+
+# --- Scraping ---
+playwright>=1.42.0               # Headless browser for Hashdive/Oddpool
+python-telegram-bot>=21.0        # Telegram bot API for Glint parsing
+
+# --- Utilities ---
+python-dotenv>=1.0.0             # .env file loading
+orjson>=3.9.0                    # Fast JSON serialization for Redis messages
+httpx>=0.27.0                    # Modern HTTP client (alternative to aiohttp)
+
+# --- GraphQL ---
+gql[aiohttp]>=3.5.0              # GraphQL client for Goldsky subgraph queries
+
+# --- Dev/Test ---
+pytest>=8.0.0                    # Test framework
+pytest-asyncio>=0.23.0           # Async test support
